@@ -1,0 +1,77 @@
+# Edge proxy: TLS termination and same-origin routing (spec 7.2, 10.1).
+#
+# The browser sees exactly one origin, so the session cookie and CSRF checks
+# behave identically in development and production, and CORS is never needed.
+
+{
+	# Caddy obtains and renews a certificate automatically. For an internal
+	# hostname, supply your own cert with `tls /path/cert.pem /path/key.pem`
+	# or use `tls internal` for Caddy's local CA.
+	email {$ACME_EMAIL:admin@example.internal}
+}
+
+{$APP_HOSTNAME} {
+	encode gzip zstd
+
+	# --- Security headers -------------------------------------------------
+	# HSTS is set here because this is the only hop that terminates TLS.
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+		# The app ships no inline script. Styles are bundled, and media/images
+		# come from this same origin only. No third-party origin is allowed.
+		# style-src-attr is called out separately on purpose: the UI animates via
+		# inline style attributes (Framer Motion, icon sizing), but `<style>`
+		# elements and external stylesheets stay restricted to 'self'. Scripts
+		# get no 'unsafe-inline' of any kind.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		-Server
+	}
+
+	# --- API --------------------------------------------------------------
+	handle /api/* {
+		# Large resumable chunks must pass through intact.
+		request_body {
+			max_size {$MAX_UPLOAD_BYTES:21474836480}
+		}
+		reverse_proxy api:8000 {
+			# SSE must stream, not buffer.
+			flush_interval -1
+			transport http {
+				# Long uploads, long downloads, long-lived event streams.
+				read_timeout 24h
+				write_timeout 24h
+			}
+		}
+	}
+
+	handle /healthz {
+		reverse_proxy api:8000
+	}
+
+	# --- Static app -------------------------------------------------------
+	handle {
+		reverse_proxy frontend:8080
+	}
+
+	log {
+		output stdout
+		# Query strings, headers, and cookies can carry user content or
+		# credentials, so they are stripped before anything is written
+		# (spec 11). Only the bare path survives.
+		format filter {
+			wrap json
+			fields {
+				# Strip the query string; only the bare path is recorded.
+				request>uri regexp "\?.*" ""
+				request>headers delete
+				resp_headers delete
+			}
+		}
+	}
+}

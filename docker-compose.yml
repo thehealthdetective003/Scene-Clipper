@@ -1,0 +1,142 @@
+# Long-Form Video Scene Clipper - single private deployment.
+#
+# Services (spec 7.2): frontend, api, worker, redis, proxy.
+# Application containers run as non-root with no added capabilities. The API
+# and worker share the application-data volume; source media and exports live
+# outside any static web root and are streamed through authenticated routes.
+
+name: scene-clipper
+
+# Secrets reach the containers through env_file rather than ${VAR} substitution.
+# Compose interpolates values it substitutes, and an Argon2id PHC hash is full of
+# '$' ($argon2id$v=19$m=...), which would be eaten as variable references.
+# env_file values are passed through literally, so no escaping is needed.
+x-app-env: &app-env
+  # These override anything in .env: they describe the container topology, not
+  # the deployment's own configuration.
+  DATA_DIR: /data
+  REDIS_URL: redis://redis:6379/0
+  TRUST_PROXY_HEADERS: "true"
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: false
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  # Bounds runaway process/thread creation. cgroups enforce this per container,
+  # unlike RLIMIT_NPROC which is per-UID and would count the worker's own
+  # threads against FFmpeg's.
+  pids_limit: 512
+
+services:
+  redis:
+    image: redis:7-alpine
+    <<: *hardening
+    # Start as the redis user directly. The entrypoint then skips its
+    # chown-and-drop-privileges path, so no capabilities need granting back --
+    # and it cannot trip over files it lacks DAC_OVERRIDE to traverse. Docker
+    # seeds a new named volume with the image's /data ownership (redis:redis).
+    user: "redis"
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [internal]
+
+  api:
+    build:
+      context: ./backend
+    <<: *hardening
+    command: ["api"]
+    env_file:
+      - .env
+    environment:
+      <<: *app-env
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+    volumes:
+      - app-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [internal]
+
+  worker:
+    build:
+      context: ./backend
+    <<: *hardening
+    command: ["worker"]
+    env_file:
+      - .env
+    environment: *app-env
+    volumes:
+      - app-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    # Media encoding is CPU-bound; cap it so the API stays responsive.
+    deploy:
+      resources:
+        limits:
+          cpus: ${WORKER_CPUS:-2.0}
+          memory: ${WORKER_MEMORY:-4g}
+          # Must match the pids_limit from the hardening anchor: Compose maps
+          # the two onto the same field and rejects differing values.
+          pids: 512
+    networks: [internal]
+
+  frontend:
+    build:
+      context: ./frontend
+    <<: *hardening
+    # The caddy binary carries file capabilities, and exec'ing it fails outright
+    # when they are absent from the bounding set -- even though it only binds
+    # the unprivileged port 8080 here.
+    cap_add:
+      - NET_BIND_SERVICE
+    networks: [internal]
+
+  proxy:
+    image: caddy:2-alpine
+    <<: *hardening
+    cap_add:
+      # Only so Caddy can bind 80/443.
+      - NET_BIND_SERVICE
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    env_file:
+      - .env
+    environment:
+      APP_HOSTNAME: ${APP_HOSTNAME:?set APP_HOSTNAME in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+      - frontend
+    networks: [internal]
+
+volumes:
+  app-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  internal:
+    driver: bridge

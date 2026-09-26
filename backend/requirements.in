@@ -1,0 +1,19 @@
+# Direct runtime dependencies. Exact pins live in requirements.txt (compiled).
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+pydantic-settings
+sqlalchemy
+alembic
+redis
+rq
+argon2-cffi
+cryptography
+# scenedetect depends on opencv-python; do NOT also pin opencv-python-headless,
+# the two distributions both install `cv2` and conflict. The Docker image
+# installs libgl1/libglib2.0-0 so the full build imports headlessly.
+scenedetect
+numpy<2
+Pillow
+google-genai

@@ -1,0 +1,16 @@
+# Static file server for the built React bundle.
+# TLS, HSTS, and /api routing are handled by the edge proxy in front of this.
+
+:8080 {
+	root * /srv
+	encode gzip zstd
+
+	# Hashed asset filenames are immutable; index.html must never be cached.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	header /index.html Cache-Control "no-store"
+
+	# Single-page app: unknown paths fall through to the shell.
+	try_files {path} /index.html
+	file_server
+}

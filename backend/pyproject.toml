@@ -1,0 +1,38 @@
+[project]
+name = "scene-clipper-backend"
+version = "1.0.0"
+description = "Long-Form Video Scene Clipper - API and analysis workers"
+requires-python = ">=3.11,<3.13"
+# Runtime dependencies are pinned in requirements.txt (compiled by pip-tools).
+dynamic = ["dependencies"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+# Async tests are opt-in per test via @pytest.mark.asyncio.
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "credentialed: hits the real Gemini API; opt-in and never part of normal CI",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette.*",
+    "ignore::DeprecationWarning:anyio.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "ANN", "PL"]
+ignore = [
+    "ANN101", "ANN102", "ANN401",
+    "PLR0913",  # the pipeline legitimately takes many keyword arguments
+    "S101",     # asserts guard internal invariants, not user input
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "ANN", "PLR2004"]
+"alembic/*" = ["ANN", "E501"]

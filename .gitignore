@@ -1,0 +1,40 @@
+# Secrets and local state
+.env
+*.env.local
+
+# Runtime data (source media, exports, database)
+/data/
+backend/data/
+backend/.devdata/
+
+# Playwright output
+frontend/playwright-report/
+frontend/test-results/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local tooling (static ffmpeg for dev)
+/tools/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+frontend/tsconfig.tsbuildinfo
+.pytest_cache/
+.run/
+
+# Claude Code local tooling permissions (machine-specific)
+.claude/settings.local.json
