@@ -49,6 +49,8 @@ class TestListing:
 
         for file in body["files"]:
             assert file["fileName"].endswith(".mp4")
+            assert file["sourceId"]
+            assert file["sourceFileName"]
             assert file["sizeBytes"] > 0
             assert file["width"] > 0 and file["height"] > 0
             assert MIN_CLIP_US - 100_000 <= file["durationUs"] <= MAX_CLIP_US + 100_000
@@ -67,6 +69,17 @@ class TestListing:
         job_id, export_id = exported
         body = auth_client.get(f"{JOBS}/{job_id}/exports/{export_id}/files").json()
         assert body["zipDownloadUrl"] == f"/api/v1/jobs/{job_id}/exports/{export_id}/download"
+        assert len(body["sourceBundles"]) == 1
+        assert body["sourceBundles"][0]["available"] is True
+
+    def test_zip_download_accepts_a_safe_editable_name(self, auth_client, exported):
+        job_id, export_id = exported
+        response = auth_client.get(
+            f"{JOBS}/{job_id}/exports/{export_id}/download",
+            params={"name": "My final cut.zip"},
+        )
+        assert response.status_code == 200
+        assert 'filename="My-final-cut.zip"' in response.headers["content-disposition"]
 
     def test_requires_authentication(self, client, exported):
         job_id, export_id = exported

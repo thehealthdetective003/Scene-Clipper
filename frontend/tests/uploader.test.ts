@@ -20,6 +20,7 @@ function makeUpload(overrides: Partial<Upload> = {}): Upload {
     state: "created",
     sha256: null,
     progressPercent: 0,
+  sourceKind: "file",
     error: null,
     createdAt: "2026-09-14T00:00:00Z",
     updatedAt: "2026-09-14T00:00:00Z",

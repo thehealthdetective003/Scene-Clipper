@@ -57,7 +57,7 @@ function ColorControl({
           aria-label={`${label} picker`}
           value={valid ? value : "#000000"}
           onChange={(event) => onChange(event.target.value.toUpperCase())}
-          className="h-10 w-12 cursor-pointer rounded-lg border border-line bg-white p-1"
+          className="h-10 w-12 cursor-pointer rounded-lg border border-line bg-paper p-1"
         />
         <Input
           value={value}
@@ -199,7 +199,7 @@ export function SourceLabelSettingsPanel() {
                   className={cn(
                     "flex items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors",
                     selected
-                      ? "border-azure-400 bg-azure-50 text-navy-900"
+                      ? "border-azure-400 bg-azure-50 text-ink-900"
                       : "border-line bg-canvas text-ink-600 hover:border-line-strong",
                   )}
                 >

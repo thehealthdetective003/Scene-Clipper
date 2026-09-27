@@ -140,7 +140,7 @@ def build_manifest(reason: str = "A clean wide shot."):
 class TestManifest:
     def test_schema_version_and_shape(self):
         manifest = build_manifest()
-        assert manifest["schemaVersion"] == "1.1"
+        assert manifest["schemaVersion"] == "1.2"
         assert manifest["createdAt"] == "2026-09-14T12:00:00Z"
         assert manifest["options"]["resolutions"] == ["original", "max720p"]
 

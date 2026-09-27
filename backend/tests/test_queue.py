@@ -31,6 +31,15 @@ class TestEnqueue:
         assert jobs[0].func_name == "app.workers.tasks.verify_upload"
         assert jobs[0].args == (upload_id,)
 
+    def test_url_download_is_scheduled(self, rq_queues):
+        upload_id = new_id()
+        assert queue_module.enqueue_url_download(upload_id) is True
+
+        jobs = rq_queues[queue_module.DOWNLOAD_QUEUE].jobs
+        assert len(jobs) == 1
+        assert jobs[0].func_name == "app.workers.tasks.download_url_upload"
+        assert jobs[0].args == (upload_id,)
+
     def test_analysis_is_scheduled(self, rq_queues):
         job_id = new_id()
         assert queue_module.enqueue_analysis(job_id) is True
@@ -51,6 +60,7 @@ class TestEnqueue:
         "enqueue",
         [
             queue_module.enqueue_upload_verification,
+            queue_module.enqueue_url_download,
             queue_module.enqueue_analysis,
             queue_module.enqueue_export,
             queue_module.enqueue_job_cleanup,

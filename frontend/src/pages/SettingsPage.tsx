@@ -121,7 +121,7 @@ function KeyRow({
           ? "border-bad-500/45 bg-bad-50"
           : entry.status === "disabled"
             ? "border-line bg-canvas opacity-60"
-            : "border-line bg-white",
+            : "border-line bg-paper",
       )}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">

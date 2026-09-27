@@ -17,16 +17,18 @@ from app.util.redis_client import get_redis
 logger = get_logger("app.queue")
 
 UPLOAD_QUEUE = "uploads"
+DOWNLOAD_QUEUE = "downloads"
 ANALYSIS_QUEUE = "analysis"
 EXPORT_QUEUE = "exports"
 MAINTENANCE_QUEUE = "maintenance"
 
-ALL_QUEUES = (ANALYSIS_QUEUE, EXPORT_QUEUE, UPLOAD_QUEUE, MAINTENANCE_QUEUE)
+ALL_QUEUES = (UPLOAD_QUEUE, DOWNLOAD_QUEUE, ANALYSIS_QUEUE, EXPORT_QUEUE, MAINTENANCE_QUEUE)
 
 #: Generous ceilings; the worker enforces its own cooperative cancellation and
 #: per-subprocess timeouts well before these fire.
 _TIMEOUTS = {
     UPLOAD_QUEUE: 3600,
+    DOWNLOAD_QUEUE: 21600,
     ANALYSIS_QUEUE: 21600,
     EXPORT_QUEUE: 21600,
     MAINTENANCE_QUEUE: 1800,
@@ -61,6 +63,12 @@ def _enqueue(queue_name: str, func_path: str, job_id: str, **kwargs: Any) -> boo
 def enqueue_upload_verification(upload_id: str) -> bool:
     return _enqueue(
         UPLOAD_QUEUE, "app.workers.tasks.verify_upload", upload_id, args=(upload_id,)
+    )
+
+
+def enqueue_url_download(upload_id: str) -> bool:
+    return _enqueue(
+        DOWNLOAD_QUEUE, "app.workers.tasks.download_url_upload", upload_id, args=(upload_id,)
     )
 
 

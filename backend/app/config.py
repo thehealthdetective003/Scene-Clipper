@@ -1,7 +1,6 @@
 """Deployment configuration.
 
-The application MUST refuse startup if the encryption key, administrator
-username, or administrator password hash is missing or malformed (spec 7.5).
+The application refuses startup if its encryption key is missing or malformed.
 Validation therefore happens eagerly at import of :func:`get_settings`.
 """
 
@@ -32,13 +31,12 @@ class Settings(BaseSettings):
     # --- Identity and secrets ------------------------------------------------
     app_base_url: str = "http://localhost:5173"
     app_encryption_key: str = ""
-    admin_username: str = ""
-    admin_password_hash: str = ""
 
     # --- Storage -------------------------------------------------------------
     data_dir: Path = Path("/data")
     max_upload_bytes: int = 21_474_836_480
     upload_chunk_bytes: int = 16_777_216
+    worker_processes: int = Field(default=3, ge=1, le=8)
 
     # --- Gemini --------------------------------------------------------------
     gemini_model: str = "gemini-3.8-flash"
@@ -74,7 +72,6 @@ class Settings(BaseSettings):
     detect_analysis_width: int = 480
 
     # --- Rate limits ---------------------------------------------------------
-    login_rate_limit_per_minute: int = 5
     key_test_rate_limit_per_minute: int = 10
 
     @field_validator("app_encryption_key")
@@ -92,28 +89,6 @@ class Settings(BaseSettings):
         if len(raw) != 32:
             raise ValueError(
                 f"APP_ENCRYPTION_KEY must decode to exactly 32 bytes, got {len(raw)}."
-            )
-        return value
-
-    @field_validator("admin_username")
-    @classmethod
-    def _validate_admin_username(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("ADMIN_USERNAME is required.")
-        return value.strip()
-
-    @field_validator("admin_password_hash")
-    @classmethod
-    def _validate_admin_password_hash(cls, value: str) -> str:
-        if not value:
-            raise ValueError(
-                "ADMIN_PASSWORD_HASH is required. Generate one with: "
-                "python -m app.cli hash-password"
-            )
-        if not value.startswith("$argon2id$"):
-            raise ValueError(
-                "ADMIN_PASSWORD_HASH must be an Argon2id PHC string "
-                "(it starts with '$argon2id$'). Plaintext passwords are refused."
             )
         return value
 

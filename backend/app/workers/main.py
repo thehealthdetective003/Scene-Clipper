@@ -7,22 +7,32 @@ queues in priority order.
 
 from __future__ import annotations
 
-import signal
 import sys
-from types import FrameType
 
-from rq import Queue, Worker
+from rq.worker_pool import WorkerPool
 
 from app.config import ConfigurationError, get_settings
 from app.logging_setup import configure_logging, get_logger
 from app.util.redis_client import get_redis
-from app.workers.queue import ANALYSIS_QUEUE, EXPORT_QUEUE, MAINTENANCE_QUEUE, UPLOAD_QUEUE
+from app.workers.queue import (
+    ANALYSIS_QUEUE,
+    DOWNLOAD_QUEUE,
+    EXPORT_QUEUE,
+    MAINTENANCE_QUEUE,
+    UPLOAD_QUEUE,
+)
 from app.workers.recovery import requeue_abandoned_work
 
 logger = get_logger("app.workers.main")
 
 #: Upload verification first: it gates every downstream stage and is cheap.
-QUEUE_PRIORITY = (UPLOAD_QUEUE, ANALYSIS_QUEUE, EXPORT_QUEUE, MAINTENANCE_QUEUE)
+QUEUE_PRIORITY = (
+    UPLOAD_QUEUE,
+    DOWNLOAD_QUEUE,
+    ANALYSIS_QUEUE,
+    EXPORT_QUEUE,
+    MAINTENANCE_QUEUE,
+)
 
 
 def main() -> int:
@@ -41,22 +51,23 @@ def main() -> int:
         logger.exception("recovery sweep failed")
 
     connection = get_redis()
-    queues = [Queue(name, connection=connection) for name in QUEUE_PRIORITY]
-    worker = Worker(queues, connection=connection)
-
-    def handle_term(signum: int, _frame: FrameType | None) -> None:
-        # Ask RQ to stop after the current job so a media subprocess is
-        # terminated by its own cancellation path rather than mid-write.
-        logger.info("shutdown requested", extra={"context": {"signal": signum}})
-        worker.request_stop(signum, _frame)
-
-    signal.signal(signal.SIGTERM, handle_term)
-    signal.signal(signal.SIGINT, handle_term)
-
-    logger.info("worker starting", extra={"context": {"queues": list(QUEUE_PRIORITY)}})
-    # Windows has no fork; burst-free scheduling still works with SimpleWorker
-    # semantics, but the default fork-based worker is used on POSIX.
-    worker.work(with_scheduler=True)
+    pool = WorkerPool(
+        QUEUE_PRIORITY,
+        connection=connection,
+        num_workers=settings.worker_processes,
+    )
+    logger.info(
+        "worker pool starting",
+        extra={
+            "context": {
+                "queues": list(QUEUE_PRIORITY),
+                "processes": settings.worker_processes,
+            }
+        },
+    )
+    # WorkerPool uses independent RQ workers, each with scheduling enabled, so
+    # uploads/downloads and source analyses can advance concurrently.
+    pool.start(burst=False, logging_level=settings.log_level)
     return 0
 
 

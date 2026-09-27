@@ -10,7 +10,7 @@ type Tone = "brand" | "azure" | "emerald" | "amber" | "rose" | "neutral";
 
 /** Kept as aliases so existing call sites keep reading naturally. */
 const TONES: Record<Tone, string> = {
-  brand: "border-navy-100 bg-navy-50 text-navy-800",
+  brand: "border-navy-100 bg-navy-50 text-ink-800",
   azure: "border-azure-100 bg-azure-50 text-azure-800",
   emerald: "border-ok-100 bg-ok-50 text-ok-600",
   amber: "border-warn-100 bg-warn-50 text-warn-600",
@@ -171,7 +171,7 @@ export function Field({
 }
 
 export const inputStyles =
-  "w-full rounded-xl border border-line-strong bg-white px-3.5 py-2.5 text-sm text-ink-900 " +
+  "w-full rounded-xl border border-line-strong bg-paper px-3.5 py-2.5 text-sm text-ink-900 " +
   "placeholder:text-ink-300 shadow-[inset_0_1px_2px_rgb(6_34_84_/_0.04)] transition-all duration-200 " +
   "hover:border-ink-200 focus:border-azure-400 focus:outline-none focus:ring-4 focus:ring-azure-500/12";
 
@@ -277,7 +277,7 @@ export function Checkbox({
           checked={checked}
           disabled={disabled}
           onChange={(event) => onChange(event.target.checked)}
-          className="peer size-full cursor-pointer appearance-none rounded-md border border-line-strong bg-white transition-colors checked:border-azure-500 checked:bg-azure-500 disabled:cursor-not-allowed"
+          className="peer size-full cursor-pointer appearance-none rounded-md border border-line-strong bg-paper transition-colors checked:border-azure-500 checked:bg-azure-500 disabled:cursor-not-allowed"
         />
         <svg
           viewBox="0 0 16 16"
@@ -368,14 +368,14 @@ export function SegmentedControl<T extends string>({
             className={cn(
               "relative rounded-full font-medium transition-colors duration-200",
               size === "sm" ? "px-3 py-1 text-xs" : "px-4 py-1.5 text-sm",
-              selected ? "text-navy-900" : "text-ink-400 hover:text-ink-700",
+              selected ? "text-ink-900" : "text-ink-400 hover:text-ink-700",
             )}
           >
             {selected && (
               <motion.span
                 layoutId={`segment-${groupId}`}
                 transition={{ type: "spring", stiffness: 420, damping: 34 }}
-                className="absolute inset-0 rounded-full bg-white shadow-soft"
+                className="absolute inset-0 rounded-full bg-paper shadow-soft"
               />
             )}
             <span className="relative">{option.label}</span>
@@ -401,7 +401,7 @@ export function Alert({
   className?: string;
 } & React.HTMLAttributes<HTMLDivElement>) {
   const skin: Record<Tone, string> = {
-    brand: "border-navy-100 bg-navy-50 text-navy-800",
+    brand: "border-navy-100 bg-navy-50 text-ink-800",
     azure: "border-azure-100 bg-azure-50 text-azure-800",
     emerald: "border-ok-100 bg-ok-50 text-ok-600",
     amber: "border-warn-100 bg-warn-50 text-warn-600",

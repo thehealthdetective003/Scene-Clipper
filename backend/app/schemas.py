@@ -53,19 +53,16 @@ JobState = Literal[
     "cancelled",
 ]
 ExportState = Literal["queued", "exporting", "complete", "failed", "cancelled"]
-UploadState = Literal["created", "uploading", "verifying", "ready", "failed"]
+UploadState = Literal["created", "uploading", "downloading", "verifying", "ready", "failed"]
+UploadSourceKind = Literal["file", "url"]
 ScoringSource = Literal["contact-sheet", "proxy-video", "local-fallback"]
 CacheStatus = Literal["none", "partial", "complete"]
 
 MAX_PROMPT_CHARS = 2000
+MAX_JOB_SOURCES = 12
 
 
 # --- Auth and settings -----------------------------------------------------
-
-
-class LoginRequest(ApiModel):
-    username: Annotated[str, StringConstraints(min_length=1, max_length=128)]
-    password: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
 
 
 class SessionResponse(ApiModel):
@@ -219,6 +216,10 @@ class CreateUploadRequest(ApiModel):
     sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F]{64}$")] | None = None
 
 
+class CreateUrlUploadRequest(ApiModel):
+    url: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+
+
 class UploadResponse(ApiModel):
     id: str
     file_name: str
@@ -228,6 +229,7 @@ class UploadResponse(ApiModel):
     state: UploadState
     sha256: str | None
     progress_percent: float
+    source_kind: UploadSourceKind
     error: JobErrorModel | None
     created_at: str
     updated_at: str
@@ -236,14 +238,12 @@ class UploadResponse(ApiModel):
 # --- Jobs ------------------------------------------------------------------
 
 
-class CreateJobRequest(ApiModel):
+class CreateJobSourceRequest(ApiModel):
     upload_id: str
-    target_clip_count: Annotated[int, Field(ge=1, le=100)] = 20
     content_prompt: Annotated[str, StringConstraints(max_length=MAX_PROMPT_CHARS)] | None = None
     source_name: Annotated[
         str, StringConstraints(max_length=SOURCE_NAME_MAX_CHARS)
     ] | None = None
-    use_gemini: bool | None = None
 
     @field_validator("content_prompt")
     @classmethod
@@ -259,6 +259,41 @@ class CreateJobRequest(ApiModel):
         return normalize_source_name(value)
 
 
+class CreateJobRequest(ApiModel):
+    # ``uploadId`` and the two top-level source fields remain accepted for API
+    # compatibility. New clients send the independently configured list.
+    upload_id: str | None = None
+    sources: Annotated[
+        list[CreateJobSourceRequest], Field(min_length=1, max_length=MAX_JOB_SOURCES)
+    ] | None = None
+    target_clip_count: Annotated[int, Field(ge=1, le=100)] = 20
+    content_prompt: Annotated[str, StringConstraints(max_length=MAX_PROMPT_CHARS)] | None = None
+    source_name: Annotated[
+        str, StringConstraints(max_length=SOURCE_NAME_MAX_CHARS)
+    ] | None = None
+    use_gemini: bool | None = None
+    ranking_enabled: bool = True
+
+    @field_validator("content_prompt")
+    @classmethod
+    def _normalize_prompt(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @field_validator("source_name")
+    @classmethod
+    def _normalize_source_name(cls, value: str | None) -> str | None:
+        return normalize_source_name(value)
+
+    @model_validator(mode="after")
+    def _one_source_shape(self) -> CreateJobRequest:
+        if bool(self.upload_id) == bool(self.sources):
+            raise ValueError("Provide either uploadId or sources, but not both.")
+        return self
+
+
 class ProgressModel(ApiModel):
     phase: JobState
     percent: float
@@ -272,6 +307,18 @@ class VideoModel(ApiModel):
     height: int
     average_frame_rate: str
     has_audio: bool
+
+
+class JobSourceModel(ApiModel):
+    id: str
+    upload_id: str
+    order: int
+    file_name: str
+    source_kind: UploadSourceKind
+    source_name: str | None
+    source_label: SourceLabelModel | None
+    content_prompt: str | None
+    video: VideoModel | None
 
 
 class AnalysisUsageModel(ApiModel):
@@ -304,6 +351,7 @@ class ExportSummaryModel(ApiModel):
 class JobSummaryModel(ApiModel):
     id: str
     source_file_name: str
+    source_count: int = 1
     state: JobState
     progress_percent: float
     target_clip_count: int
@@ -326,6 +374,8 @@ class JobResponse(ApiModel):
     content_prompt: str | None
     source_label: SourceLabelModel | None
     use_gemini: bool
+    ranking_enabled: bool
+    sources: list[JobSourceModel]
     video: VideoModel | None
     progress: ProgressModel
     eligible_count: int | None
@@ -352,6 +402,9 @@ class TransitionBoundaryModel(ApiModel):
 class CandidateShotModel(ApiModel):
     id: str
     job_id: str
+    source_id: str
+    source_name: str | None
+    source_file_name: str
     shot_number: int
     source_start_us: int
     source_end_us: int
@@ -465,6 +518,9 @@ class ExportFileModel(ApiModel):
     serial: int
     resolution: Resolution
     candidate_id: str
+    source_id: str
+    source_name: str | None
+    source_file_name: str
     file_name: str
     width: int
     height: int
@@ -476,9 +532,23 @@ class ExportFileModel(ApiModel):
     available: bool
 
 
+class SourceBundleModel(ApiModel):
+    """One on-demand ZIP containing only clips from a single job source."""
+
+    source_id: str
+    source_name: str | None
+    source_file_name: str
+    file_name: str
+    file_count: int
+    size_bytes: int
+    available: bool
+    download_url: str
+
+
 class ExportFilesResponse(ApiModel):
     files: list[ExportFileModel]
     zip_download_url: str | None
+    source_bundles: list[SourceBundleModel]
 
 
 class ExportProgressModel(ApiModel):

@@ -22,23 +22,14 @@ _TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="clipper-tests-"))
 
 #: A recognizable sentinel. Security tests assert it never escapes (spec 10.4).
 FAKE_GEMINI_KEY = "AIzaSyFAKEKEYSENTINEL_do_not_log_0000000"
-TEST_PASSWORD = "correct-horse-battery-staple"
-
 os.environ.setdefault("APP_BASE_URL", "https://clips.test.internal")
 os.environ["APP_ENCRYPTION_KEY"] = base64.b64encode(b"0" * 32).decode("ascii")
-os.environ["ADMIN_USERNAME"] = "admin"
 os.environ["DATA_DIR"] = str(_TEST_DATA_DIR)
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
 os.environ["HTTPS_ENABLED"] = "true"
 os.environ["LOG_LEVEL"] = "WARNING"
 os.environ["GEMINI_MODEL"] = "gemini-test-model"
 os.environ["GEMINI_REQUEST_CAP"] = "8"
-
-from argon2 import PasswordHasher  # noqa: E402
-
-os.environ["ADMIN_PASSWORD_HASH"] = PasswordHasher(
-    time_cost=1, memory_cost=8192, parallelism=1
-).hash(TEST_PASSWORD)
 
 # Locate FFmpeg for media tests; absent tools simply skip those tests.
 _WINGET_FFMPEG = (
@@ -122,7 +113,9 @@ def db_session():
 @pytest.fixture
 def no_queue(monkeypatch):
     """Neutralize enqueueing so tests drive workers explicitly."""
-    calls: dict[str, list] = {"analysis": [], "export": [], "upload": [], "cleanup": []}
+    calls: dict[str, list] = {
+        "analysis": [], "export": [], "upload": [], "download": [], "cleanup": []
+    }
 
     monkeypatch.setattr(
         "app.api.routes_jobs.enqueue_analysis",
@@ -139,6 +132,10 @@ def no_queue(monkeypatch):
     monkeypatch.setattr(
         "app.api.routes_uploads.enqueue_upload_verification",
         lambda upload_id: calls["upload"].append(upload_id) or True,
+    )
+    monkeypatch.setattr(
+        "app.api.routes_uploads.enqueue_url_download",
+        lambda upload_id: calls["download"].append(upload_id) or True,
     )
     return calls
 
@@ -164,12 +161,10 @@ def client(no_queue):
 
 @pytest.fixture
 def auth_client(client):
-    """Signed in, with the CSRF token attached to every request."""
-    response = client.post(
-        "/api/v1/auth/login", json={"username": "admin", "password": TEST_PASSWORD}
-    )
-    assert response.status_code == 204, response.text
-    session = client.get("/api/v1/session").json()
+    """Bootstrapped with the CSRF token attached to every request."""
+    response = client.get("/api/v1/session")
+    assert response.status_code == 200, response.text
+    session = response.json()
     assert session["authenticated"] is True
     client.headers["X-CSRF-Token"] = session["csrfToken"]
     return client

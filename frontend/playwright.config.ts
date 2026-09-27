@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const browserChannel = process.env.E2E_BROWSER_CHANNEL === "chrome" ? "chrome" : undefined;
+
 /**
  * Browser-level end-to-end coverage (spec 12.7).
  *
@@ -21,5 +23,13 @@ export default defineConfig({
     video: "off",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        ...(browserChannel ? { channel: browserChannel } : {}),
+      },
+    },
+  ],
 });

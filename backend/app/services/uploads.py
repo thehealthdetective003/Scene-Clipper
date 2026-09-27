@@ -21,9 +21,11 @@ import base64
 import binascii
 import datetime as dt
 import hashlib
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
@@ -40,9 +42,10 @@ from app.models import Upload, utcnow
 from app.services import storage
 
 READ_BLOCK_BYTES = 1024 * 1024
+ASCII_CONTROL_LIMIT = 32
 
 #: Terminal and transitional upload states (spec 8.3).
-UPLOAD_STATES = ("created", "uploading", "verifying", "ready", "failed")
+UPLOAD_STATES = ("created", "uploading", "downloading", "verifying", "ready", "failed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +105,7 @@ def create_upload(
         verified_offset_bytes=0,
         chunk_size_bytes=settings.upload_chunk_bytes,
         state="created",
+        source_kind="file",
         client_sha256=client_sha256.lower() if client_sha256 else None,
         storage_ext=storage.sanitize_extension(file_name),
     )
@@ -113,6 +117,28 @@ def create_upload(
     source_path = directory / f"source.{upload.storage_ext}"
     if not source_path.exists():
         source_path.touch()
+    return upload
+
+
+def create_url_upload(db: DbSession, settings: Settings, *, url: str) -> Upload:
+    """Create a durable placeholder for a single remote video download."""
+    normalized = normalize_video_url(url)
+    hostname = urlsplit(normalized).hostname or "video"
+    upload = Upload(
+        file_name=_sanitize_display_name(f"Video from {hostname}"),
+        declared_mime_type=None,
+        # yt-dlp may not know the final merged size until transfer time.
+        declared_size_bytes=0,
+        verified_offset_bytes=0,
+        chunk_size_bytes=settings.upload_chunk_bytes,
+        state="downloading",
+        source_kind="url",
+        source_url=normalized,
+        storage_ext="bin",
+    )
+    db.add(upload)
+    db.flush()
+    storage.ensure_dir(upload.relative_dir, settings)
     return upload
 
 
@@ -131,7 +157,7 @@ def validate_chunk_request(
     upload: Upload, settings: Settings, *, offset: int, declared_length: int
 ) -> None:
     """Reject a chunk before any bytes are read (spec 5.3)."""
-    if upload.state in ("verifying", "ready"):
+    if upload.state in ("downloading", "verifying", "ready"):
         raise conflict(
             "upload_already_complete", "This upload has already been completed."
         )
@@ -303,9 +329,62 @@ def begin_completion(db: DbSession, upload: Upload, settings: Settings) -> Uploa
     return upload
 
 
-def fail_upload(db: DbSession, upload: Upload, code: str, message: str) -> None:
+def fail_upload(
+    db: DbSession,
+    upload: Upload,
+    code: str,
+    message: str,
+    *,
+    phase: str = "verifying",
+    retryable: bool = False,
+) -> None:
     upload.state = "failed"
-    upload.error = _error_payload(code, message)
+    upload.error = _error_payload(code, message, phase=phase, retryable=retryable)
+    upload.updated_at = utcnow()
+    db.flush()
+
+
+def update_download_progress(
+    db: DbSession,
+    upload: Upload,
+    *,
+    downloaded_bytes: int,
+    total_bytes: int | None,
+) -> None:
+    """Persist throttled yt-dlp progress without ever trusting it as a path."""
+    if upload.state != "downloading":
+        return
+    safe_downloaded = max(0, int(downloaded_bytes))
+    # Separate video/audio streams report their own byte counters. Keep the UI
+    # monotonic instead of jumping backwards when yt-dlp starts stream two.
+    upload.verified_offset_bytes = max(upload.verified_offset_bytes, safe_downloaded)
+    if total_bytes is not None and total_bytes > 0:
+        upload.declared_size_bytes = max(
+            upload.declared_size_bytes,
+            upload.verified_offset_bytes,
+            int(total_bytes),
+        )
+    upload.updated_at = utcnow()
+    db.flush()
+
+
+def finish_url_download(
+    db: DbSession,
+    upload: Upload,
+    *,
+    title: str | None,
+    extension: str,
+    size_bytes: int,
+) -> None:
+    """Move a completed URL import into the ordinary verification lifecycle."""
+    safe_extension = storage.sanitize_extension(f"source.{extension}", default="bin")
+    display_title = _sanitize_display_name(title or "Downloaded video")
+    upload.file_name = _sanitize_display_name(f"{display_title}.{safe_extension}")
+    upload.storage_ext = safe_extension
+    upload.declared_size_bytes = size_bytes
+    upload.verified_offset_bytes = size_bytes
+    upload.state = "verifying"
+    upload.error = None
     upload.updated_at = utcnow()
     db.flush()
 
@@ -367,12 +446,68 @@ def _sanitize_display_name(file_name: str) -> str:
     return cleaned[:255] or "video"
 
 
-def _error_payload(code: str, message: str) -> dict[str, Any]:
+def normalize_video_url(value: str) -> str:
+    """Accept only public-looking HTTP(S) URLs and strip non-request fragments.
+
+    The worker resolves the hostname again immediately before yt-dlp runs.  The
+    duplicate check prevents a DNS change between API validation and queue
+    execution from turning this feature into a private-network fetch primitive.
+    """
+    cleaned = (value or "").strip()
+    if any(ord(char) < ASCII_CONTROL_LIMIT for char in cleaned):
+        raise validation_error(
+            "invalid_video_url", "The video URL contains invalid characters."
+        )
+    try:
+        parts = urlsplit(cleaned)
+        # Accessing port performs urllib's port-range validation.
+        _ = parts.port
+    except ValueError as exc:
+        raise validation_error("invalid_video_url", "Enter a valid video URL.") from exc
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        raise validation_error(
+            "invalid_video_url", "Enter a full http:// or https:// video URL."
+        )
+    if parts.username is not None or parts.password is not None:
+        raise validation_error(
+            "invalid_video_url", "Video URLs containing embedded credentials are not accepted."
+        )
+
+    hostname = parts.hostname.rstrip(".").lower()
+    if (
+        hostname == "localhost"
+        or hostname.endswith((".localhost", ".local"))
+        or "." not in hostname
+    ):
+        raise validation_error(
+            "private_video_url", "Private-network and local video URLs are not accepted."
+        )
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        raise validation_error(
+            "private_video_url", "Private-network and local video URLs are not accepted."
+        )
+
+    # Fragments are browser-side navigation and can accidentally contain
+    # tokens; yt-dlp never needs them for the HTTP request.
+    return urlunsplit((parts.scheme.lower(), parts.netloc, parts.path, parts.query, ""))
+
+
+def _error_payload(
+    code: str,
+    message: str,
+    *,
+    phase: str = "verifying",
+    retryable: bool = False,
+) -> dict[str, Any]:
     return {
-        "phase": "verifying",
+        "phase": phase,
         "code": code,
         "message": message,
-        "retryable": False,
+        "retryable": retryable,
         "occurredAt": utcnow().isoformat().replace("+00:00", "Z"),
     }
 

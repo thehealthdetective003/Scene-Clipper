@@ -1,45 +1,22 @@
 """Operator command line.
 
     python -m app.cli generate-key      # APP_ENCRYPTION_KEY
-    python -m app.cli hash-password     # ADMIN_PASSWORD_HASH
     python -m app.cli check-config      # validate the environment
     python -m app.cli check-media       # verify ffmpeg/ffprobe are usable
     python -m app.cli requeue           # recover abandoned work after a restart
 
-The password is read from a prompt or stdin and never echoed, never stored, and
-never passed as an argument (which would land in shell history).
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
-import getpass
 import os
 import sys
 
 
 def _generate_key() -> int:
     print(base64.b64encode(os.urandom(32)).decode("ascii"))
-    return 0
-
-
-def _hash_password() -> int:
-    from app.security.passwords import hash_password
-
-    if sys.stdin.isatty():
-        password = getpass.getpass("New administrator password: ")
-        confirm = getpass.getpass("Repeat password: ")
-        if password != confirm:
-            print("Passwords do not match.", file=sys.stderr)
-            return 1
-    else:
-        password = sys.stdin.readline().rstrip("\n")
-
-    if len(password) < 12:
-        print("Use a password of at least 12 characters.", file=sys.stderr)
-        return 1
-    print(hash_password(password))
     return 0
 
 
@@ -142,7 +119,7 @@ def _requeue() -> int:
     counts = requeue_abandoned_work()
     print(
         f"Requeued {counts['jobs']} job(s), {counts['exports']} export(s), "
-        f"{counts['uploads']} upload verification(s)."
+        f"{counts['uploads']} upload verification(s), {counts['downloads']} download(s)."
     )
     return 0
 
@@ -152,7 +129,6 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("generate-key", "Print a new base64 32-byte APP_ENCRYPTION_KEY."),
-        ("hash-password", "Read a password and print its Argon2id hash."),
         ("check-config", "Validate the deployment configuration."),
         ("check-media", "Verify that ffmpeg and ffprobe are usable."),
         ("db-ready", "Exit 0 once the database schema is migrated and stamped."),
@@ -163,7 +139,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     return {
         "generate-key": _generate_key,
-        "hash-password": _hash_password,
         "check-config": _check_config,
         "check-media": _check_media,
         "db-ready": _db_ready,

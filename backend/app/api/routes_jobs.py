@@ -32,7 +32,10 @@ router = APIRouter(tags=["jobs"])
 
 def _job_payload(db, job) -> JobResponse:  # noqa: ANN001
     return job_response(
-        job, usage=jobs.usage_for(db, job.id), latest_export=jobs.latest_export(db, job.id)
+        job,
+        usage=jobs.usage_for(db, job.id),
+        latest_export=jobs.latest_export(db, job.id),
+        sources=jobs.sources_for(db, job.id),
     )
 
 
@@ -46,8 +49,13 @@ def list_jobs(
     page = jobs.list_jobs(db, cursor=cursor, limit=limit)
     return JobListResponse(
         items=[
-            job_summary(job, source_file_name=file_name, latest_export=export)
-            for job, file_name, export in page.items
+            job_summary(
+                job,
+                source_file_name=file_name,
+                source_count=source_count,
+                latest_export=export,
+            )
+            for job, file_name, source_count, export in page.items
         ],
         next_cursor=page.next_cursor,
     )
@@ -82,6 +90,19 @@ def create_job(
         content_prompt=payload.content_prompt,
         source_name=payload.source_name,
         use_gemini=payload.use_gemini,
+        ranking_enabled=payload.ranking_enabled,
+        sources=(
+            [
+                {
+                    "upload_id": source.upload_id,
+                    "content_prompt": source.content_prompt,
+                    "source_name": source.source_name,
+                }
+                for source in payload.sources
+            ]
+            if payload.sources
+            else None
+        ),
     )
     audit.record(
         db,
@@ -93,6 +114,8 @@ def create_job(
             "useGemini": job.use_gemini,
             "target": job.target_clip_count,
             "sourceLabelEnabled": job.source_name is not None,
+            "sourceCount": len(payload.sources or [payload.upload_id]),
+            "rankingEnabled": job.ranking_enabled,
         },
     )
     response = _job_payload(db, job)

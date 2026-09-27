@@ -16,7 +16,6 @@ from app.security.crypto import (
     decrypt_secret,
     encrypt_secret,
 )
-from app.security.passwords import hash_password, verify_password, verify_username
 from app.versions import ENCRYPTION_FORMAT_VERSION
 
 MASTER = b"\x11" * 32
@@ -121,39 +120,18 @@ def _flip(data: bytes) -> bytes:
     return bytes(mutated)
 
 
-class TestPasswords:
-    def test_hash_and_verify(self):
-        encoded = hash_password("a-sufficiently-long-password")
-        assert encoded.startswith("$argon2id$")
-        assert verify_password("a-sufficiently-long-password", encoded)
-        assert not verify_password("wrong", encoded)
-
-    def test_empty_configured_hash_never_authenticates(self):
-        assert verify_password("anything", "") is False
-
-    def test_malformed_hash_never_authenticates(self):
-        assert verify_password("anything", "$argon2id$garbage") is False
-
-    def test_username_comparison(self):
-        assert verify_username("admin", "admin")
-        assert not verify_username("Admin", "admin")
-        assert not verify_username("adminx", "admin")
-
-
 class TestStartupValidation:
     """The app must refuse to start when secrets are missing or malformed."""
 
     def _settings(self, **overrides):
         base = {
             "app_encryption_key": base64.b64encode(os.urandom(32)).decode(),
-            "admin_username": "admin",
-            "admin_password_hash": "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA",
         }
         base.update(overrides)
         return Settings(_env_file=None, **base)
 
     def test_valid_configuration_loads(self):
-        assert self._settings().admin_username == "admin"
+        assert len(self._settings().encryption_key_bytes) == 32
 
     @pytest.mark.parametrize(
         "override",
@@ -161,10 +139,6 @@ class TestStartupValidation:
             {"app_encryption_key": ""},
             {"app_encryption_key": "not-base64!!"},
             {"app_encryption_key": base64.b64encode(b"short").decode()},
-            {"admin_username": "   "},
-            {"admin_password_hash": ""},
-            {"admin_password_hash": "plaintext-password"},
-            {"admin_password_hash": "$2b$12$bcryptstylehash"},
         ],
     )
     def test_invalid_configuration_is_refused(self, override):

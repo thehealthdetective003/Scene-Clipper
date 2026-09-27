@@ -9,20 +9,22 @@ request payload (spec 5.2).
 from __future__ import annotations
 
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import session_scope
+from app.downloading import run_url_download
 from app.logging_setup import get_logger
-from app.models import Export, Job, ProviderFile, Upload, utcnow
+from app.models import Job, JobSource, ProviderFile, Upload, utcnow
 from app.security.crypto import DecryptionError
-from app.services import jobs as job_service
-from app.services import settings_service, storage, uploads as upload_service
+from app.services import settings_service, storage
+from app.services import uploads as upload_service
 from app.workers import leases
 
 logger = get_logger("app.workers.tasks")
+_DOWNLOAD_CANCEL_POLL_SECONDS = 0.75
 
 
 class _Heartbeat:
@@ -65,6 +67,38 @@ def _with_lease(kind: str, resource_id: str, work: Callable[[_Heartbeat], None])
 
 
 # --- Upload verification ---------------------------------------------------
+
+
+def download_url_upload(upload_id: str) -> None:
+    def work(heartbeat: _Heartbeat) -> None:
+        last_check = 0.0
+        cancelled = False
+
+        def should_cancel() -> bool:
+            nonlocal last_check, cancelled
+            if heartbeat.lost:
+                return True
+            now = time.monotonic()
+            if now - last_check < _DOWNLOAD_CANCEL_POLL_SECONDS:
+                return cancelled
+            last_check = now
+            heartbeat()
+            with session_scope() as db:
+                upload = db.get(Upload, upload_id)
+                cancelled = (
+                    upload is None
+                    or upload.deleted_at is not None
+                    or upload.state != "downloading"
+                )
+            return cancelled or heartbeat.lost
+
+        run_url_download(
+            upload_id,
+            should_cancel=should_cancel,
+            heartbeat=heartbeat,
+        )
+
+    _with_lease("download", upload_id, work)
 
 
 def verify_upload(upload_id: str) -> None:
@@ -167,7 +201,11 @@ def cleanup_job(job_id: str) -> None:
             job = db.get(Job, job_id)
             if job is None or job.deleted_at is None:
                 return
-            upload_id = job.upload_id
+            upload_ids = list(
+                db.execute(
+                    select(JobSource.upload_id).where(JobSource.job_id == job_id)
+                ).scalars()
+            ) or [job.upload_id]
 
         storage.remove_tree(storage.job_dir(job_id), settings)
         storage.remove_tree(f"exports/{job_id}", settings)
@@ -179,10 +217,11 @@ def cleanup_job(job_id: str) -> None:
             job = db.get(Job, job_id)
             if job is None:
                 return
-            upload = db.get(Upload, upload_id)
-            if upload is not None and upload.reference_count <= 0:
-                storage.remove_tree(upload.relative_dir, settings)
-                upload.deleted_at = utcnow()
+            for upload_id in set(upload_ids):
+                upload = db.get(Upload, upload_id)
+                if upload is not None and upload.reference_count <= 0:
+                    storage.remove_tree(upload.relative_dir, settings)
+                    upload.deleted_at = utcnow()
             job.cleanup_completed_at = utcnow()
             db.flush()
 

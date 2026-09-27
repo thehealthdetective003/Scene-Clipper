@@ -6,8 +6,8 @@ set -eu
 role="${1:-api}"
 
 # Validation runs only for the long-lived roles. Operator commands such as
-# `generate-key` and `hash-password` must work *before* the deployment is
-# configured, so they fall through to the catch-all branch untouched.
+# `generate-key` must work *before* the deployment is configured, so it falls
+# through to the catch-all branch untouched.
 case "$role" in
   api)
     python -m app.cli check-config

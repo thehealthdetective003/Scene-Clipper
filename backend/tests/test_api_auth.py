@@ -1,4 +1,4 @@
-"""Authentication, CSRF, origin, and security headers (spec 5.1, 10.1, 12.6)."""
+"""Automatic sessions, CSRF, origin checks, and security headers."""
 
 from __future__ import annotations
 
@@ -6,120 +6,60 @@ import json
 
 import pytest
 
-from tests.conftest import TEST_PASSWORD
-
-LOGIN = "/api/v1/auth/login"
 SESSION = "/api/v1/session"
-LOGOUT = "/api/v1/auth/logout"
 
 
-def login(client, password=TEST_PASSWORD, username="admin"):
-    return client.post(LOGIN, json={"username": username, "password": password})
+class TestAutomaticSession:
+    def test_first_visit_creates_a_ready_session(self, client):
+        response = client.get(SESSION)
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is True
+        assert response.json()["csrfToken"]
+        assert client.cookies.get("clipper_session")
 
+    def test_existing_session_is_reused(self, client):
+        first = client.get(SESSION)
+        cookie = client.cookies.get("clipper_session")
+        csrf = first.json()["csrfToken"]
 
-class TestLogin:
-    def test_correct_credentials_create_a_session(self, client):
-        assert login(client).status_code == 204
-        assert client.get(SESSION).json()["authenticated"] is True
+        second = client.get(SESSION)
+        assert client.cookies.get("clipper_session") == cookie
+        assert second.json()["csrfToken"] == csrf
+        assert "set-cookie" not in second.headers
 
-    @pytest.mark.parametrize(
-        ("username", "password"),
-        [("admin", "wrong"), ("wrong", TEST_PASSWORD), ("", ""), ("Admin", TEST_PASSWORD)],
-    )
-    def test_incorrect_credentials_are_rejected(self, client, username, password):
-        response = client.post(LOGIN, json={"username": username, "password": password})
-        assert response.status_code in (401, 422)
-        if response.status_code == 401:
-            assert response.json()["error"]["code"] == "unauthorized"
-
-    def test_failure_message_does_not_say_which_field_was_wrong(self, client):
-        message = login(client, password="wrong").json()["error"]["message"]
-        assert "username or password" in message.lower()
-
-    def test_session_identifier_rotates_on_login(self, client):
-        login(client)
-        first = client.cookies.get("clipper_session")
-        login(client)
-        second = client.cookies.get("clipper_session")
-        assert first and second and first != second
+    def test_tampered_cookie_is_replaced_on_bootstrap(self, client):
+        client.cookies.set(
+            "clipper_session", "forged-token-value", domain="clips.test.internal", path="/"
+        )
+        response = client.get(SESSION)
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is True
+        assert client.cookies.get("clipper_session") != "forged-token-value"
 
     def test_cookie_attributes(self, client):
-        response = login(client)
-        header = response.headers["set-cookie"]
+        header = client.get(SESSION).headers["set-cookie"]
         assert "HttpOnly" in header
         assert "SameSite=strict" in header or "SameSite=Strict" in header
-        assert "Secure" in header  # HTTPS_ENABLED with a non-loopback base URL
+        assert "Secure" in header
         assert "Path=/" in header
 
-    def test_rate_limiting_after_repeated_failures(self, client):
-        codes = [login(client, password="wrong").status_code for _ in range(8)]
-        assert 429 in codes
-        throttled = login(client, password="wrong")
-        if throttled.status_code == 429:
-            assert throttled.headers.get("Retry-After")
-            assert throttled.json()["error"]["retryable"] is True
-
-    def test_password_is_never_echoed(self, client):
+    @pytest.mark.parametrize("path", ["/api/v1/auth/login", "/api/v1/auth/logout"])
+    def test_credential_routes_no_longer_exist(self, client, path):
         response = client.post(
-            LOGIN, json={"username": "admin", "password": "a-distinctive-wrong-password"}
+            path, json={"username": "admin", "password": "secret"}
         )
-        assert "a-distinctive-wrong-password" not in response.text
-        assert TEST_PASSWORD not in response.text
+        assert response.status_code == 404
 
 
-class TestOriginAndFetchMetadata:
-    def test_cross_origin_login_is_blocked(self, client):
-        response = client.post(
-            LOGIN,
-            json={"username": "admin", "password": TEST_PASSWORD},
-            headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
-        )
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "cross_origin_blocked"
-
-    def test_missing_origin_is_blocked(self, client):
-        client.headers.pop("Origin", None)
-        response = client.post(
-            LOGIN, json={"username": "admin", "password": TEST_PASSWORD}
-        )
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "missing_origin"
-
-    def test_referer_fallback_is_accepted(self, client):
-        client.headers.pop("Origin", None)
-        response = client.post(
-            LOGIN,
-            json={"username": "admin", "password": TEST_PASSWORD},
-            headers={"Referer": "https://clips.test.internal/login"},
-        )
-        assert response.status_code == 204
-
-    def test_cross_site_fetch_metadata_is_blocked(self, client):
-        response = client.post(
-            LOGIN,
-            json={"username": "admin", "password": TEST_PASSWORD},
-            headers={"Sec-Fetch-Site": "same-site"},
-        )
-        assert response.status_code == 403
-
-    def test_top_level_navigation_is_blocked(self, client):
-        response = client.post(
-            LOGIN,
-            json={"username": "admin", "password": TEST_PASSWORD},
-            headers={"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Dest": "document"},
-        )
-        assert response.status_code == 403
-
-
-class TestCsrf:
+class TestOriginAndCsrf:
     def test_state_changing_request_requires_a_token(self, client):
-        login(client)
+        client.get(SESSION)
         response = client.delete("/api/v1/settings/gemini")
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "invalid_csrf_token"
 
     def test_wrong_token_is_rejected(self, client):
-        login(client)
+        client.get(SESSION)
         response = client.delete(
             "/api/v1/settings/gemini", headers={"X-CSRF-Token": "not-the-token"}
         )
@@ -128,33 +68,42 @@ class TestCsrf:
     def test_correct_token_is_accepted(self, auth_client):
         assert auth_client.delete("/api/v1/settings/gemini").status_code == 204
 
-    def test_cross_origin_mutation_with_a_valid_token_is_still_blocked(self, auth_client):
+    def test_cross_origin_mutation_with_a_valid_token_is_blocked(self, auth_client):
         response = auth_client.delete(
-            "/api/v1/settings/gemini", headers={"Origin": "https://evil.example"}
+            "/api/v1/settings/gemini",
+            headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
         )
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "cross_origin_blocked"
 
+    def test_missing_origin_is_blocked(self, auth_client):
+        auth_client.headers.pop("Origin", None)
+        response = auth_client.delete("/api/v1/settings/gemini")
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "missing_origin"
+
+    def test_cross_site_fetch_metadata_is_blocked(self, auth_client):
+        response = auth_client.delete(
+            "/api/v1/settings/gemini", headers={"Sec-Fetch-Site": "same-site"}
+        )
+        assert response.status_code == 403
+
+    def test_top_level_navigation_is_blocked(self, auth_client):
+        response = auth_client.delete(
+            "/api/v1/settings/gemini",
+            headers={"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Dest": "document"},
+        )
+        assert response.status_code == 403
+
     def test_safe_requests_need_no_token(self, client):
-        login(client)
+        client.get(SESSION)
         assert client.get("/api/v1/jobs").status_code == 200
 
     def test_csrf_token_is_not_a_cookie(self, auth_client):
-        # The UI keeps it in memory only (spec 8.2).
         assert "csrf" not in "".join(auth_client.cookies.keys()).lower()
 
 
 class TestSessionLifecycle:
-    def test_unauthenticated_session_reports_false(self, client):
-        body = client.get(SESSION).json()
-        assert body["authenticated"] is False
-        assert body["csrfToken"] is None
-
-    def test_logout_invalidates_immediately(self, auth_client):
-        assert auth_client.post(LOGOUT).status_code == 204
-        assert auth_client.get(SESSION).json()["authenticated"] is False
-        assert auth_client.get("/api/v1/jobs").status_code == 401
-
     @pytest.mark.parametrize(
         ("method", "path"),
         [
@@ -167,14 +116,22 @@ class TestSessionLifecycle:
             ("put", "/api/v1/jobs/some-id/review"),
         ],
     )
-    def test_protected_routes_require_authentication(self, client, method, path):
+    def test_protected_routes_require_bootstrap(self, client, method, path):
         send = getattr(client, method)
         response = send(path) if method == "get" else send(path, json={})
         assert response.status_code == 401, f"{method} {path}"
 
-    def test_tampered_cookie_is_rejected(self, auth_client):
-        auth_client.cookies.set("clipper_session", "forged-token-value")
+    def test_bootstrap_unlocks_protected_routes(self, client):
+        client.get(SESSION)
+        assert client.get("/api/v1/jobs").status_code == 200
+
+    def test_tampered_cookie_is_rejected_until_rebootstrapped(self, auth_client):
+        auth_client.cookies.set(
+            "clipper_session", "forged-token-value", domain="clips.test.internal", path="/"
+        )
         assert auth_client.get("/api/v1/jobs").status_code == 401
+        assert auth_client.get(SESSION).status_code == 200
+        assert auth_client.get("/api/v1/jobs").status_code == 200
 
 
 class TestSecurityHeaders:
@@ -209,9 +166,6 @@ class TestErrorEnvelope:
             json={"fileName": "x.mp4", "sizeBytes": -5, "mimeType": "video/mp4"},
         )
         assert response.status_code == 422
-        # The submitted value must not be echoed back. Checked field by field
-        # rather than over the whole body, because `requestId` is a random UUID
-        # that can legitimately contain "-5".
         error = response.json()["error"]
         assert "-5" not in error["message"]
         assert "-5" not in json.dumps(error["details"] or {})

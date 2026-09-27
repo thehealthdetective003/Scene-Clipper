@@ -18,7 +18,7 @@ shots that already passed the continuity gate, to explain the ranking, and to
 pick the best maximum-length region inside a long shot.
 
 ```
-upload → probe → detect boundaries → safe intervals → local features
+upload or link → download/probe → detect boundaries → safe intervals → local features
                                                           ↓
                        review ← rank (Gemini optional) ← contact sheets
                           ↓
@@ -53,42 +53,12 @@ disqualify a shot**. Only cuts, fades, dissolves, and corruption do.
 cp .env.example .env
 ```
 
-Generate the two secrets and put them in `.env`. These run before the stack
-exists, so they do not go through Compose:
+Generate the encryption key and put it in `.env`:
 
 ```bash
 # APP_ENCRYPTION_KEY — base64 of 32 random bytes
 openssl rand -base64 32
-
-# ADMIN_PASSWORD_HASH — Argon2id. The password is typed at a prompt, never
-# passed as an argument, so it never lands in shell history.
-docker build -t scene-clipper-backend ./backend
-docker run --rm -it scene-clipper-backend python -m app.cli hash-password
 ```
-
-**Escape the hash for Compose.** An Argon2id PHC string is full of `$`
-(`$argon2id$v=19$m=65536,...`), and Docker Compose treats `$` in `.env` as a
-variable reference — it will silently eat `$argon2id`, `$v`, and `$m`, and the
-API will then refuse to start with "must be an Argon2id PHC string". Double
-every `$` when writing the value into `.env`:
-
-```bash
-# $argon2id$v=19$...  ->  $$argon2id$$v=19$$...
-python - <<'PY'
-import pathlib
-p = pathlib.Path(".env"); out = []
-for line in p.read_text().splitlines():
-    if line.startswith("ADMIN_PASSWORD_HASH="):
-        k, _, v = line.partition("=")
-        line = f"{k}={v.replace('$$', '$').replace('$', '$$')}"   # idempotent
-    out.append(line)
-p.write_text("\n".join(out) + "\n")
-PY
-```
-
-The doubled form is what belongs in `.env`; Compose passes the single-`$`
-value through to the container. `APP_ENCRYPTION_KEY` is base64 and needs no
-escaping.
 
 Set `APP_BASE_URL` and `APP_HOSTNAME` to the hostname you will actually use,
 then start everything:
@@ -122,17 +92,21 @@ marked `Secure` for every non-loopback deployment.
 
 ## Use
 
-1. **Sign in** with the shared administrator credentials.
+1. Open Scene Clipper; a local browser session starts automatically.
 2. **Settings** → choose the source-label font, text/outline colors, and
    responsive size. New jobs snapshot these defaults. You can also add a
    Gemini API key (optional); it is validated, encrypted with AES-256-GCM, and
    never displayed again — not even partially.
-3. **New job** → drop in one MP4/MOV/MKV/WebM. The upload is resumable: an
-   interrupted transfer continues from the last verified byte.
-4. Choose a target clip count (1–100), optional source name, and optional focus
-   prompt. A source name is normalized to one uppercase Latin-script line and
-   appears at the top left of review previews and every exported MP4. Leave it
-   blank for unchanged, unlabelled clips.
+3. **New job** → add up to 12 MP4/MOV/MKV/WebM files, public video links, or a
+   mix of both. Put one URL per line and Scene Clipper downloads the videos in
+   the highest available quality. File uploads and link downloads start
+   concurrently; file uploads remain resumable. Playlists, channels, private
+   videos, and live/upcoming streams are not imported.
+4. Give each source its own optional source name and ranking instruction. A
+   source name is normalized to one uppercase Latin-script line and appears at
+   the top left of that source's review previews and exported MP4s. Automatic
+   ranking and preselection are optional; leave them off to start with a blank
+   manual selection.
 5. Watch progress live. Closing the tab does not affect the job.
 6. **Review**: preview clips, deselect, reorder by drag, and adjust trims. The
    handles cannot leave the safe interval, and the server revalidates and
@@ -160,8 +134,6 @@ configured, or a cap of `0`, nothing leaves the deployment at all.
 cd backend
 python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 export APP_ENCRYPTION_KEY=$(python -m app.cli generate-key)
-export ADMIN_USERNAME=admin
-export ADMIN_PASSWORD_HASH=$(echo 'a-long-dev-password' | python -m app.cli hash-password)
 export DATA_DIR=$PWD/.devdata APP_BASE_URL=http://localhost:5173 HTTPS_ENABLED=false
 python -m alembic upgrade head
 uvicorn app.main:app --reload --port 8000
@@ -187,7 +159,6 @@ export FFMPEG_PATH=/path/to/ffmpeg FFPROBE_PATH=/path/to/ffprobe
 
 ```bash
 python -m app.cli generate-key     # new APP_ENCRYPTION_KEY
-python -m app.cli hash-password    # new ADMIN_PASSWORD_HASH
 python -m app.cli check-config     # validate the environment
 python -m app.cli check-media      # verify ffmpeg/ffprobe are usable
 python -m app.cli requeue          # requeue abandoned work after a crash
@@ -215,7 +186,7 @@ Two suites are opt-in:
 GEMINI_SMOKE_KEY=... .venv/bin/python -m pytest -m credentialed
 
 # Browser end-to-end — needs a running stack
-cd frontend && E2E_PASSWORD=... npx playwright test
+cd frontend && npx playwright test
 ```
 
 ---
@@ -278,5 +249,5 @@ frontend/                 React 18 · TypeScript · Vite · Tailwind v4 · Frame
 * Subprocess CPU/memory rlimits are POSIX-only. On Windows, media subprocesses
   are bounded by wall-clock timeout alone; the Docker deployment gets the full
   set.
-* Out of scope by design: URL/platform imports, multiple sources per job,
+* Out of scope by design: private/authenticated video imports, playlists,
   automatic social crops, reframing, captions, and transcription.

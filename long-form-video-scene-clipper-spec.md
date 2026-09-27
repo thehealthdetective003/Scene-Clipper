@@ -4,7 +4,7 @@ Implementation-ready specification for a private, self-hosted web application.
 
 **Document status:** Draft  
 **Primary audience:** Coding agents and engineers  
-**MVP deployment:** One private installation with one shared administrator login  
+**MVP deployment:** One private installation with automatic local sessions
 **Primary objective:** Turn one long-form source video into a reviewed, serially numbered collection of the best 3–6 second continuous shots while minimizing Gemini API use.
 
 ---
@@ -126,22 +126,20 @@ All media positions in APIs and persistence MUST use integer microseconds. Frame
 
 ## 5. Functional Requirements
 
-### 5.1 Authentication
+### 5.1 Local sessions
 
-- The MVP MUST have one shared administrator account.
-- The deployment MUST be initialized with an Argon2id password hash, not a plaintext password.
-- Login MUST create a server-side session and rotate the session identifier.
-- Logout MUST invalidate the session immediately.
+- The MVP MUST open without a username or password prompt.
+- `GET /session` MUST create a server-side session automatically when the browser has no live session and rotate any missing, expired, or invalid session identifier.
+- The application MUST NOT expose login or logout endpoints.
 - Session cookies MUST be `HttpOnly`, `SameSite=Strict`, and `Secure` whenever HTTPS is enabled.
-- Login MUST enforce exact same-origin `Origin`/`Referer` and Fetch Metadata validation plus rate limiting, but does not require a session CSRF token.
-- Every authenticated state-changing request MUST require a CSRF token and exact same-origin validation.
-- All upload, preview, job, export, download, and settings routes MUST require authentication.
+- Every session-bound state-changing request MUST require a CSRF token and exact same-origin validation.
+- All upload, preview, job, export, download, and settings routes MUST require a live local session.
 
 ### 5.2 Gemini key management
 
 - The settings page MUST provide test, save/replace, and delete actions.
 - The request cap MUST be an integer from 0–50. A value of `0` forces local-only analysis; the default is `8`.
-- The browser MUST send the key only over an authenticated HTTPS request, except that `http://localhost` and loopback IP origins are permitted for same-machine development/self-hosting.
+- The browser MUST send the key only over a session-bound HTTPS request, except that `http://localhost` and loopback IP origins are permitted for same-machine development/self-hosting.
 - The frontend MUST NOT place the key in local storage, session storage, IndexedDB, URLs, analytics, logs, or error telemetry.
 - The backend MUST encrypt the key with AES-256-GCM using:
   - a 32-byte deployment master key supplied through the environment;
@@ -602,7 +600,7 @@ Pin all runtime dependencies and commit lock files. Media binaries and detector 
 Docker Compose SHOULD contain:
 
 - `frontend`: builds and serves the React application;
-- `api`: authentication, REST endpoints, SSE, database access, and download streaming;
+- `api`: local sessions, REST endpoints, SSE, database access, and download streaming;
 - `worker`: RQ analysis/export workers and local media tools;
 - `redis`: queue, leases, and ephemeral coordination;
 - `proxy`: same-origin routing and HTTPS termination.
@@ -669,8 +667,6 @@ Provide `.env.example` without secrets:
 ```dotenv
 APP_BASE_URL=https://clips.example.internal
 APP_ENCRYPTION_KEY=
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD_HASH=
 DATA_DIR=/data
 MAX_UPLOAD_BYTES=21474836480
 UPLOAD_CHUNK_BYTES=16777216
@@ -682,7 +678,7 @@ RETENTION_ENABLED=false
 LOG_LEVEL=INFO
 ```
 
-`APP_ENCRYPTION_KEY` is a base64-encoded 32-byte random value. The application MUST refuse startup if the encryption key, administrator username, or administrator password hash is missing or malformed.
+`APP_ENCRYPTION_KEY` is a base64-encoded 32-byte random value. The application MUST refuse startup if the encryption key is missing or malformed.
 
 ---
 
@@ -700,7 +696,7 @@ LOG_LEVEL=INFO
 - Created resources return `201 Created`.
 - Accepted asynchronous work returns `202 Accepted`.
 - Successful mutations without bodies return `204 No Content`.
-- Upload completion, job creation, cancellation/retry, review replacement, export creation, and job deletion accept an `Idempotency-Key`. Login, logout, session reads, and upload chunks do not use the generic mechanism.
+- Upload completion, job creation, cancellation/retry, review replacement, export creation, and job deletion accept an `Idempotency-Key`. Session reads and upload chunks do not use the generic mechanism.
 - Bind an idempotency record to the authenticated principal, method, route, and canonical request-body fingerprint. Replaying the same key and fingerprint returns the original status/body; reusing the key with a different fingerprint returns `409 idempotency_conflict`.
 - Retain an idempotency record for at least the lifetime of the resource it created, and never less than 24 hours. Upload chunks use their offset/checksum semantics instead.
 
@@ -731,13 +727,11 @@ Use:
 - `503` for an unavailable dependency;
 - `507` for insufficient storage.
 
-### 8.2 Authentication and settings
+### 8.2 Sessions and settings
 
 | Method | Path | Request and result |
 |---|---|---|
-| `POST` | `/auth/login` | `{ "username", "password" }` → `204`; creates and rotates the server session. |
-| `POST` | `/auth/logout` | Invalidates current session → `204`. |
-| `GET` | `/session` | `{ "authenticated", "csrfToken" }`; UI keeps CSRF token in memory only. |
+| `GET` | `/session` | Creates or refreshes the automatic local session and returns `{ "authenticated", "csrfToken" }`; UI keeps the CSRF token in memory only. |
 | `GET` | `/settings/gemini` | Returns `{ "configured", "model", "requestCap", "updatedAt" }`, never the key. |
 | `POST` | `/settings/gemini/test` | `{ "apiKey", "model" }` → sanitized validity result; does not persist. |
 | `PUT` | `/settings/gemini` | `{ "apiKey", "model", "requestCap" }`; cap must be an integer from 0–50; validates, encrypts, and replaces settings. |
@@ -745,7 +739,7 @@ Use:
 | `GET` | `/settings/source-label` | Returns the global `{ "fontPreset", "fillColor", "outlineColor", "sizePercent", "updatedAt" }` defaults. |
 | `PUT` | `/settings/source-label` | Validates and replaces the global typography defaults used by new jobs. |
 
-Rate-limit login and key-test routes. Do not log their bodies.
+Rate-limit key-test routes. Do not log their bodies.
 
 ### 8.3 Uploads
 
@@ -1088,8 +1082,8 @@ Treat every CSV string as untrusted. Prefix cells beginning with `=`, `+`, `-`, 
 - Keep the frontend and API same-origin; disable permissive CORS.
 - Apply a restrictive Content Security Policy and standard frame, MIME-sniffing, referrer, and permissions headers.
 - Trust proxy headers only from the configured reverse proxy.
-- Rate-limit authentication and key-validation attempts.
-- Record login success/failure, key replacement/deletion, job deletion, and export creation without recording secrets or media payloads.
+- Rate-limit key-validation attempts.
+- Record key replacement/deletion, job deletion, and export creation without recording secrets or media payloads.
 
 ### 10.2 Media and filesystem
 
@@ -1234,7 +1228,7 @@ Assertions:
 
 ### 12.6 Security tests
 
-- Correct/incorrect password, throttling, session rotation/expiry, and logout invalidation.
+- Automatic session bootstrap, invalid-cookie rotation, expiry, and absent credential routes.
 - Missing/invalid CSRF and cross-origin mutation attempts.
 - Exact cookie attributes, HSTS only after TLS, CSP/security headers, disabled cross-origin credentials, and spoofed forwarding-header rejection.
 - Unauthorized and guessed preview/download URLs.
@@ -1246,7 +1240,7 @@ Assertions:
 
 ### 12.7 End-to-end scenario
 
-1. Sign in and save a test Gemini key.
+1. Open the app without credentials and save a test Gemini key.
 2. Start an upload, interrupt it, and resume from the verified offset.
 3. Analyze a fixture containing cuts, a dissolve, short shots, and a long shot.
 4. Confirm progress survives an SSE disconnect.
@@ -1279,7 +1273,7 @@ The MVP is accepted only when all of the following are true:
 14. An interrupted upload resumes without retransmitting verified bytes.
 15. Killing a worker or restarting services resumes from a committed checkpoint without duplicate candidates or corrupt published output.
 16. Cancellation terminates active processing and leaves no attempt-only published files.
-17. Every authenticated state-changing route enforces authentication, same-origin checks, and CSRF protection; login enforces origin/Fetch-Metadata checks and throttling.
+17. Every session-bound state-changing route enforces a live local session, same-origin checks, and CSRF protection; no credential prompt or login endpoint exists.
 18. A planted Gemini-key sentinel is absent from logs, responses, browser storage, queue payloads, manifests, and ZIPs.
 19. Persisted Gemini key material is authenticated ciphertext, and any tampering causes safe decryption failure.
 20. The complete end-to-end scenario passes in CI with Gemini mocked.
@@ -1290,7 +1284,7 @@ The MVP is accepted only when all of the following are true:
 
 ### Milestone 1: secure foundation and uploads
 
-- Docker Compose, configuration validation, database migrations, shared login, sessions, CSRF, and encryption.
+- Docker Compose, configuration validation, database migrations, automatic local sessions, CSRF, and encryption.
 - Resumable upload API, browser uploader, SHA-256 verification, ffprobe validation, and upload recovery tests.
 
 ### Milestone 2: deterministic local analysis

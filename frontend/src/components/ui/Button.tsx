@@ -13,9 +13,9 @@ const VARIANTS: Record<Variant, string> = {
   navy:
     "bg-navy-900 text-white shadow-navy hover:bg-navy-800 active:translate-y-px",
   outline:
-    "border border-line-strong bg-white text-ink-800 shadow-soft hover:border-azure-300 hover:bg-azure-50 hover:text-navy-800",
+    "border border-line-strong bg-paper text-ink-800 shadow-soft hover:border-azure-300 hover:bg-azure-50 hover:text-ink-900",
   ghost: "text-ink-500 hover:bg-canvas-2 hover:text-ink-900",
-  subtle: "bg-canvas-2 text-ink-700 hover:bg-navy-100 hover:text-navy-800",
+  subtle: "bg-canvas-2 text-ink-700 hover:bg-navy-100 hover:text-ink-900",
   danger:
     "border border-bad-100 bg-bad-50 text-bad-600 hover:border-bad-500/40 hover:bg-bad-100",
 };
@@ -130,7 +130,7 @@ export function MovingBorderButton({
         aria-hidden
         className="absolute inset-[-200%] animate-border-spin bg-[conic-gradient(from_0deg,transparent_0deg,var(--color-azure-400)_70deg,var(--color-navy-700)_140deg,transparent_210deg)]"
       />
-      <span className="relative inline-flex h-full w-full items-center justify-center gap-2 rounded-full bg-white px-6 text-[15px] font-semibold text-navy-900 transition-colors group-hover:bg-navy-50">
+      <span className="relative inline-flex h-full w-full items-center justify-center gap-2 rounded-full bg-paper px-6 text-[15px] font-semibold text-ink-900 transition-colors group-hover:bg-navy-50">
         {children}
       </span>
     </button>

@@ -39,7 +39,7 @@ export function HeroShowcase() {
             <span className="size-3 rounded-full bg-[#FEBC2E]" />
             <span className="size-3 rounded-full bg-[#28C840]" />
           </div>
-          <div className="mx-auto hidden items-center gap-2 rounded-full border border-line bg-white px-3.5 py-1 text-[11px] font-medium text-ink-400 sm:flex">
+          <div className="mx-auto hidden items-center gap-2 rounded-full border border-line bg-paper px-3.5 py-1 text-[11px] font-medium text-ink-400 sm:flex">
             <span className="size-1.5 rounded-full bg-ok-500" />
             scene-clipper · review
           </div>
@@ -111,7 +111,7 @@ export function HeroShowcase() {
                 initial={{ opacity: 0, y: 14 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5, delay: 0.95 + index * 0.07 }}
-                className="group/clip overflow-hidden rounded-xl border border-line bg-white shadow-soft"
+                className="group/clip overflow-hidden rounded-xl border border-line bg-paper shadow-soft"
               >
                 <div className={cn("relative aspect-video bg-gradient-to-br", clip.hue)}>
                   <span className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgb(255_255_255_/_0.28),transparent_55%)]" />

@@ -3,7 +3,13 @@
  * All media positions are integer microseconds.
  */
 
-export type UploadState = "created" | "uploading" | "verifying" | "ready" | "failed";
+export type UploadState =
+  | "created"
+  | "uploading"
+  | "downloading"
+  | "verifying"
+  | "ready"
+  | "failed";
 
 export type JobState =
   | "uploaded"
@@ -73,6 +79,7 @@ export interface Upload {
   state: UploadState;
   sha256: string | null;
   progressPercent: number;
+  sourceKind: "file" | "url";
   error: JobError | null;
   createdAt: string;
   updatedAt: string;
@@ -88,6 +95,7 @@ export interface ExportSummary {
 export interface JobSummary {
   id: string;
   sourceFileName: string;
+  sourceCount: number;
   state: JobState;
   progressPercent: number;
   targetClipCount: number;
@@ -130,6 +138,8 @@ export interface Job {
   contentPrompt: string | null;
   sourceLabel: SourceLabel | null;
   useGemini: boolean;
+  rankingEnabled: boolean;
+  sources: JobSource[];
   video: {
     sha256: string;
     durationUs: number;
@@ -151,6 +161,24 @@ export interface Job {
   updatedAt: string;
 }
 
+export interface JobSource {
+  id: string;
+  uploadId: string;
+  order: number;
+  fileName: string;
+  sourceKind: "file" | "url";
+  sourceName: string | null;
+  sourceLabel: SourceLabel | null;
+  contentPrompt: string | null;
+  video: Job["video"];
+}
+
+export interface JobSourceInput {
+  uploadId: string;
+  sourceName: string | null;
+  contentPrompt: string | null;
+}
+
 export interface TransitionBoundary {
   startUs: number;
   endUs: number;
@@ -160,6 +188,9 @@ export interface TransitionBoundary {
 export interface CandidateShot {
   id: string;
   jobId: string;
+  sourceId: string;
+  sourceName: string | null;
+  sourceFileName: string;
   shotNumber: number;
   sourceStartUs: number;
   sourceEndUs: number;
@@ -237,6 +268,9 @@ export interface ExportFile {
   serial: number;
   resolution: Resolution;
   candidateId: string;
+  sourceId: string;
+  sourceName: string | null;
+  sourceFileName: string;
   fileName: string;
   width: number;
   height: number;
@@ -248,9 +282,21 @@ export interface ExportFile {
   available: boolean;
 }
 
+export interface SourceBundle {
+  sourceId: string;
+  sourceName: string | null;
+  sourceFileName: string;
+  fileName: string;
+  fileCount: number;
+  sizeBytes: number;
+  available: boolean;
+  downloadUrl: string;
+}
+
 export interface ExportFilesResponse {
   files: ExportFile[];
   zipDownloadUrl: string | null;
+  sourceBundles: SourceBundle[];
 }
 
 /** Key health. `exhausted` and `invalid` are the states shown in red. */

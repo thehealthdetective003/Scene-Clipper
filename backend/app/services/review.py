@@ -29,7 +29,7 @@ from app.media.timebase import (
     quantize_end_us,
     quantize_start_us,
 )
-from app.models import CandidateShot, Job, SelectedClip, utcnow
+from app.models import CandidateShot, Job, JobSource, SelectedClip, utcnow
 from app.services import events
 
 #: States in which the review may be edited (spec 5.6).
@@ -39,6 +39,13 @@ EDITABLE_STATES = {"review-ready", "complete"}
 def job_frame_rate(job: Job) -> Fraction:
     video = job.video or {}
     return parse_rational(video.get("averageFrameRate") or "25")
+
+
+def candidate_frame_rate(db: DbSession, job: Job, candidate: CandidateShot) -> Fraction:
+    source = db.get(JobSource, candidate.source_id)
+    if source is not None and source.video:
+        return parse_rational(source.video.get("averageFrameRate") or "25")
+    return job_frame_rate(job)
 
 
 def list_candidates(db: DbSession, job_id: str) -> list[CandidateShot]:
@@ -173,8 +180,6 @@ def replace_review(
             select(CandidateShot).where(CandidateShot.id.in_(candidate_ids or [""]))
         ).scalars()
     }
-    rate = job_frame_rate(job)
-
     validated: list[tuple[CandidateShot, int, int, int]] = []
     for candidate_id, order, start_us, end_us in clips:
         candidate = candidates.get(candidate_id)
@@ -191,7 +196,10 @@ def replace_review(
                 {"candidateId": candidate_id},
             )
         quantized_start, quantized_end = validate_trim(
-            candidate, start_us=start_us, end_us=end_us, rate=rate
+            candidate,
+            start_us=start_us,
+            end_us=end_us,
+            rate=candidate_frame_rate(db, job, candidate),
         )
         validated.append((candidate, order, quantized_start, quantized_end))
 
@@ -272,3 +280,12 @@ def auto_select(db: DbSession, job: Job, candidates: list[CandidateShot]) -> lis
     job.updated_at = utcnow()
     db.flush()
     return rows
+
+
+def begin_manual_review(db: DbSession, job: Job) -> None:
+    """Start a review with no automatic choices; the editor selects every clip."""
+    db.execute(delete(SelectedClip).where(SelectedClip.job_id == job.id))
+    job.review_revision += 1
+    job.selected_count = 0
+    job.updated_at = utcnow()
+    db.flush()

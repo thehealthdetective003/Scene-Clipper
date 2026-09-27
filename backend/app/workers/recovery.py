@@ -21,16 +21,26 @@ from app.workers.queue import (
     enqueue_job_cleanup,
     enqueue_provider_file_cleanup,
     enqueue_upload_verification,
+    enqueue_url_download,
 )
 
 logger = get_logger("app.workers.recovery")
 
 
-def requeue_abandoned_work() -> dict[str, int]:
-    counts = {"jobs": 0, "exports": 0, "uploads": 0, "cleanups": 0}
+def requeue_abandoned_work() -> dict[str, int]:  # noqa: PLR0912 - one sweep, five resources
+    counts = {"jobs": 0, "exports": 0, "uploads": 0, "downloads": 0, "cleanups": 0}
 
     with session_scope() as db:
         leases.purge_expired(db)
+
+        # --- Remote video downloads interrupted before publication --------
+        for upload in db.execute(
+            select(Upload).where(Upload.state == "downloading", Upload.deleted_at.is_(None))
+        ).scalars():
+            if leases.is_held_by_other(db, leases.lease_key("download", upload.id), "recovery"):
+                continue
+            if enqueue_url_download(upload.id):
+                counts["downloads"] += 1
 
         # --- Uploads stuck in verification --------------------------------
         for upload in db.execute(

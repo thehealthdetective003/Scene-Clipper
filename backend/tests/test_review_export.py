@@ -408,7 +408,7 @@ class TestExport:
 
             assert len(rows) == sum(len(c["files"]) for c in manifest["clips"])
             assert manifest["source"]["averageFrameRate"]
-            assert manifest["schemaVersion"] == "1.1"
+            assert manifest["schemaVersion"] == "1.2"
             assert "sourceLabel" in manifest["options"]
 
     def test_download_streams_the_archive(self, auth_client, analysed_job):

@@ -8,9 +8,9 @@ from app.api.deps import AuthDep, CsrfDep, DbDep, SettingsDep
 from app.api.errors import AppError, validation_error
 from app.api.serializers import upload_response
 from app.db import session_scope
-from app.schemas import CreateUploadRequest, UploadResponse
-from app.services import idempotency, storage, uploads
-from app.workers.queue import enqueue_upload_verification
+from app.schemas import CreateUploadRequest, CreateUrlUploadRequest, UploadResponse
+from app.services import idempotency, uploads
+from app.workers.queue import enqueue_upload_verification, enqueue_url_download
 
 router = APIRouter(tags=["uploads"])
 
@@ -62,6 +62,53 @@ def create_upload(
         response_body=response.model_dump(by_alias=True),
         resource_id=upload.id,
     )
+    return response
+
+
+@router.post(
+    "/uploads/from-url",
+    response_model=UploadResponse,
+    response_model_by_alias=True,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_url_upload(
+    payload: CreateUrlUploadRequest,
+    db: DbDep,
+    settings: SettingsDep,
+    auth: CsrfDep,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> UploadResponse:
+    """Queue one public video URL for highest-quality download and verification."""
+    route = "/uploads/from-url"
+    body = payload.model_dump(by_alias=True)
+    replay = idempotency.lookup(
+        db,
+        key=idempotency_key,
+        principal=auth.username,
+        method="POST",
+        route=route,
+        body=body,
+    )
+    if replay is not None and replay.resource_id:
+        upload = uploads.get_upload(db, replay.resource_id)
+        if upload.state == "downloading":
+            enqueue_url_download(upload.id)
+        return upload_response(upload)
+
+    upload = uploads.create_url_upload(db, settings, url=payload.url)
+    response = upload_response(upload)
+    idempotency.remember(
+        db,
+        key=idempotency_key,
+        principal=auth.username,
+        method="POST",
+        route=route,
+        body=body,
+        status_code=status.HTTP_202_ACCEPTED,
+        response_body=response.model_dump(by_alias=True),
+        resource_id=upload.id,
+    )
+    enqueue_url_download(upload.id)
     return response
 
 

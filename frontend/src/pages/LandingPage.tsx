@@ -25,7 +25,6 @@ import {
   SectionHeading,
 } from "../components/ui/Primitives";
 import { Aurora, GridPattern, Marquee, SpotlightCard } from "../components/ui/Spotlight";
-import { useSession } from "../hooks/useSession";
 import { MAX_CLIP_SECONDS, MIN_CLIP_SECONDS } from "../lib/clip";
 
 /* ------------------------------------------------------------------ data */
@@ -151,10 +150,8 @@ const STATS = [
 /* ------------------------------------------------------------------ page */
 
 export function LandingPage() {
-  const { session } = useSession();
-  const signedIn = Boolean(session?.authenticated);
-  const primaryHref = signedIn ? "/jobs" : "/login";
-  const primaryLabel = signedIn ? "Open the app" : "Get started";
+  const primaryHref = "/jobs";
+  const primaryLabel = "Open the app";
 
   return (
     <div className="overflow-clip">
@@ -170,7 +167,7 @@ export function LandingPage() {
             transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
             className="mx-auto max-w-3xl text-center"
           >
-            <span className="inline-flex items-center gap-2 rounded-full border border-line bg-white/80 px-3.5 py-1.5 text-xs font-medium text-ink-600 shadow-soft backdrop-blur">
+            <span className="inline-flex items-center gap-2 rounded-full border border-line bg-paper/80 px-3.5 py-1.5 text-xs font-medium text-ink-600 shadow-soft backdrop-blur">
               <span className="relative flex size-1.5">
                 <span className="absolute inset-0 animate-pulse-ring rounded-full bg-azure-500" />
                 <span className="relative size-1.5 rounded-full bg-azure-500" />
@@ -221,12 +218,12 @@ export function LandingPage() {
       </section>
 
       {/* ====================================================== Capability */}
-      <section className="border-y border-line bg-white/60 py-5">
+      <section className="border-y border-line bg-paper/60 py-5">
         <Marquee duration="46s">
           {CAPABILITIES.map((item) => (
             <span
               key={item}
-              className="inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-line bg-white px-4 py-2 text-[13px] font-medium text-ink-600 shadow-soft"
+              className="inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-line bg-paper px-4 py-2 text-[13px] font-medium text-ink-600 shadow-soft"
             >
               <span className="size-1.5 rounded-full bg-azure-500" />
               {item}
@@ -251,7 +248,7 @@ export function LandingPage() {
               <Reveal key={feature.title} delay={index * 0.06} className={feature.span}>
                 <SpotlightCard
                   className={`h-full p-6 sm:p-7 ${
-                    feature.accent ? "border-navy-100 bg-gradient-to-br from-navy-50 to-white" : ""
+                    feature.accent ? "border-navy-100 bg-gradient-to-br from-navy-50 to-paper" : ""
                   }`}
                 >
                   <span
@@ -380,7 +377,7 @@ export function LandingPage() {
       </section>
 
       {/* ========================================================== Stats */}
-      <section className="border-y border-line bg-white/70 px-4 py-14 sm:px-6">
+      <section className="border-y border-line bg-paper/70 px-4 py-14 sm:px-6">
         <div className="mx-auto grid max-w-5xl grid-cols-2 gap-8 lg:grid-cols-4">
           {STATS.map((stat, index) => (
             <Reveal key={stat.label} delay={index * 0.06} className="text-center">
@@ -486,7 +483,7 @@ export function LandingPage() {
                   Ready to cut your first video?
                 </h2>
                 <p className="mx-auto mt-4 max-w-md text-[15px] text-ink-500">
-                  Sign in, drop one long file, and come back to a ranked set of clips you can
+                  Add your videos or links, then come back to a set of clips you can
                   review, trim, and export.
                 </p>
                 <div className="mt-8 flex flex-wrap items-center justify-center gap-3">

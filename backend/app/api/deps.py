@@ -43,7 +43,7 @@ def require_session(request: Request, db: DbDep, settings: SettingsDep) -> AuthC
     token = request.cookies.get(SESSION_COOKIE_NAME)
     session = load_session(db, settings, token)
     if session is None or token is None:
-        raise unauthorized("Sign in to continue.")
+        raise unauthorized("Reload the app to start a new local session.")
     return AuthContext(session=session, username=session.username, token=token)
 
 

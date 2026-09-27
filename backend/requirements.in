@@ -8,7 +8,6 @@ sqlalchemy
 alembic
 redis
 rq
-argon2-cffi
 cryptography
 # scenedetect depends on opencv-python; do NOT also pin opencv-python-headless,
 # the two distributions both install `cv2` and conflict. The Docker image
@@ -17,3 +16,7 @@ scenedetect
 numpy<2
 Pillow
 google-genai
+# Remote video ingestion. The default extra ships yt-dlp's EJS challenge
+# scripts; the deno extra supplies the recommended sandboxed JS runtime needed
+# for full YouTube support.
+yt-dlp[default,deno]==2026.8.19

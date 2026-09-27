@@ -1,9 +1,9 @@
 """Server-side session lifecycle (spec 5.1).
 
 The cookie carries a high-entropy opaque token; only its SHA-256 is persisted,
-so a database read cannot reconstruct a usable cookie. Login always mints a new
-session row and deletes the prior one, which rotates the session identifier.
-Sessions expire on both an idle timeout and an absolute lifetime.
+so a database read cannot reconstruct a usable cookie. The UI bootstrap mints a
+session automatically when one is missing or expired. Sessions expire on both
+an idle timeout and an absolute lifetime.
 """
 
 from __future__ import annotations

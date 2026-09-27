@@ -22,7 +22,7 @@ export function LogoMark({
     <span
       className={cn(
         "relative grid flex-none place-items-center overflow-hidden rounded-[28%]",
-        "bg-white ring-1 ring-line shadow-soft",
+        "bg-paper ring-1 ring-line shadow-soft",
         className,
       )}
       style={{ height: size, width: size }}

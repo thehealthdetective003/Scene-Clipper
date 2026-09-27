@@ -1,82 +1,81 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { AnimatePresence, motion } from "motion/react";
 
 import { api } from "./api/client";
-import type { SessionInfo } from "./api/types";
 import { Button } from "./components/ui/Button";
 import { Logo, LogoMark } from "./components/ui/Logo";
+import { ThemeSwitcher } from "./components/ui/ThemeSwitcher";
 import {
   IconArrowRight,
   IconFilm,
-  IconLogout,
   IconMenu,
   IconPlus,
   IconSettings,
   IconX,
 } from "./components/ui/Icons";
 import { cn } from "./lib/cn";
-import { SessionContext, useSession } from "./hooks/useSession";
 import { JobPage } from "./pages/JobPage";
 import { JobsPage } from "./pages/JobsPage";
 import { LandingPage } from "./pages/LandingPage";
-import { LoginPage } from "./pages/LoginPage";
 import { NewJobPage } from "./pages/NewJobPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 /* ------------------------------------------------------------- session */
 
-function SessionProvider({ children }: { children: React.ReactNode }) {
-  const [session, setSession] = useState<SessionInfo | null>(null);
+function SessionBootstrap({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const startupRequested = useRef(false);
 
-  const refresh = useCallback(async () => {
+  const start = useCallback(async () => {
+    setLoading(true);
+    setFailed(false);
     try {
-      setSession(await api.session());
+      const session = await api.session();
+      if (!session.authenticated || !session.csrfToken) throw new Error("Session unavailable");
     } catch {
-      setSession({ authenticated: false, csrfToken: null });
+      setFailed(true);
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (startupRequested.current) return;
+    startupRequested.current = true;
+    void start();
+  }, [start]);
 
-  const value = useMemo(
-    () => ({
-      session,
-      loading,
-      refresh,
-      signIn: async (username: string, password: string) => {
-        await api.login(username, password);
-        await refresh();
-      },
-      signOut: async () => {
-        await api.logout();
-        setSession({ authenticated: false, csrfToken: null });
-      },
-    }),
-    [session, loading, refresh],
-  );
-
-  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
-}
-
-function RequireAuth({ children }: { children: React.ReactElement }) {
-  const { session, loading } = useSession();
   if (loading) {
     return (
-      <div className="flex min-h-[60vh] items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center bg-canvas">
         <div className="flex items-center gap-3 text-sm text-ink-400">
           <span className="size-2 animate-pulse rounded-full bg-azure-500" />
-          Loading…
+          Opening Scene Clipper…
         </div>
       </div>
     );
   }
-  if (!session?.authenticated) return <Navigate to="/login" replace />;
+  if (failed) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-canvas px-4">
+        <div className="w-full max-w-md rounded-3xl border border-line bg-paper p-8 text-center shadow-float">
+          <div className="flex justify-center">
+            <LogoMark size={44} />
+          </div>
+          <h1 className="mt-5 text-xl font-semibold text-ink-900">Could not open the app</h1>
+          <p className="mt-2 text-sm leading-relaxed text-ink-500">
+            Scene Clipper could not start its local session. Check that the backend is running,
+            then try again.
+          </p>
+          <Button variant="primary" className="mt-6" onClick={() => void start()}>
+            Try again
+          </Button>
+        </div>
+      </div>
+    );
+  }
   return children;
 }
 
@@ -103,14 +102,14 @@ function AppNav() {
             <span
               className={cn(
                 "relative flex items-center gap-2 rounded-full px-4 py-1.5 text-sm font-medium transition-colors",
-                isActive ? "text-navy-900" : "text-ink-500 hover:text-ink-900",
+                isActive ? "text-ink-900" : "text-ink-500 hover:text-ink-900",
               )}
             >
               {isActive && (
                 <motion.span
                   layoutId="nav-pill"
                   transition={{ type: "spring", stiffness: 420, damping: 34 }}
-                  className="absolute inset-0 rounded-full bg-white shadow-soft"
+                  className="absolute inset-0 rounded-full bg-paper shadow-soft"
                 />
               )}
               <Icon className="relative" style={{ height: 16, width: 16 }} />
@@ -140,13 +139,10 @@ function MarketingNav() {
 }
 
 function Header() {
-  const { session, signOut } = useSession();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
 
-  const signedIn = Boolean(session?.authenticated);
   const onLanding = location.pathname === "/";
-  const onLogin = location.pathname === "/login";
 
   useEffect(() => {
     setMenuOpen(false);
@@ -155,60 +151,37 @@ function Header() {
   return (
     <header className="sticky top-0 z-50 border-b border-line glass">
       <div className="mx-auto flex h-[68px] w-full max-w-[1440px] items-center justify-between gap-4 px-4 sm:px-6">
-        <Link to={signedIn && !onLanding ? "/jobs" : "/"} className="no-underline">
+        <Link to={onLanding ? "/" : "/jobs"} className="no-underline">
           <Logo size={38} />
         </Link>
 
-        {onLanding ? <MarketingNav /> : signedIn && <AppNav />}
+        {onLanding ? <MarketingNav /> : <AppNav />}
 
         <div className="flex items-center gap-2">
-          {signedIn ? (
-            <>
-              {onLanding ? (
-                <Link to="/jobs" className="no-underline">
-                  <Button variant="primary" size="sm">
-                    Open the app
-                    <IconArrowRight style={{ height: 15, width: 15 }} />
-                  </Button>
-                </Link>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void signOut()}
-                  className="hidden sm:inline-flex"
-                >
-                  <IconLogout style={{ height: 16, width: 16 }} />
-                  Sign out
-                </Button>
-              )}
-            </>
-          ) : (
-            !onLogin && (
-              <Link to="/login" className="no-underline">
-                <Button variant="primary" size="sm">
-                  Get started
-                  <IconArrowRight style={{ height: 15, width: 15 }} />
-                </Button>
-              </Link>
-            )
+          <ThemeSwitcher />
+
+          {onLanding && (
+            <Link to="/jobs" className="no-underline">
+              <Button variant="primary" size="sm">
+                Open the app
+                <IconArrowRight style={{ height: 15, width: 15 }} />
+              </Button>
+            </Link>
           )}
 
-          {(signedIn || onLanding) && (
-            <button
-              type="button"
-              onClick={() => setMenuOpen((open) => !open)}
-              aria-label={menuOpen ? "Close menu" : "Open menu"}
-              aria-expanded={menuOpen}
-              className="grid size-9 place-items-center rounded-full border border-line bg-white text-ink-600 transition-colors hover:bg-canvas md:hidden"
-            >
-              {menuOpen ? (
-                <IconX style={{ height: 17, width: 17 }} />
-              ) : (
-                <IconMenu style={{ height: 17, width: 17 }} />
-              )}
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => setMenuOpen((open) => !open)}
+            aria-label={menuOpen ? "Close menu" : "Open menu"}
+            aria-expanded={menuOpen}
+            className="grid size-9 place-items-center rounded-full border border-line bg-paper text-ink-600 transition-colors hover:bg-canvas md:hidden"
+          >
+            {menuOpen ? (
+              <IconX style={{ height: 17, width: 17 }} />
+            ) : (
+              <IconMenu style={{ height: 17, width: 17 }} />
+            )}
+          </button>
         </div>
       </div>
 
@@ -220,7 +193,7 @@ function Header() {
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-            className="overflow-hidden border-t border-line bg-white/95 md:hidden"
+            className="overflow-hidden border-t border-line bg-paper/95 md:hidden"
           >
             <div className="space-y-1 px-4 py-3">
               {onLanding
@@ -242,7 +215,7 @@ function Header() {
                         cn(
                           "flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium no-underline transition-colors",
                           isActive
-                            ? "bg-navy-50 text-navy-900"
+                            ? "bg-navy-50 text-ink-900"
                             : "text-ink-600 hover:bg-canvas",
                         )
                       }
@@ -252,16 +225,6 @@ function Header() {
                     </NavLink>
                   ))}
 
-              {signedIn && !onLanding && (
-                <button
-                  type="button"
-                  onClick={() => void signOut()}
-                  className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium text-ink-600 transition-colors hover:bg-canvas"
-                >
-                  <IconLogout style={{ height: 16, width: 16 }} />
-                  Sign out
-                </button>
-              )}
             </div>
           </motion.div>
         )}
@@ -272,7 +235,7 @@ function Header() {
 
 function Footer() {
   return (
-    <footer className="border-t border-line bg-white/60">
+    <footer className="border-t border-line bg-paper/60">
       <div className="mx-auto w-full max-w-[1440px] px-4 py-10 sm:px-6">
         <div className="flex flex-col items-start justify-between gap-6 sm:flex-row sm:items-center">
           <div className="flex items-center gap-3">
@@ -313,46 +276,18 @@ function Shell({ children }: { children: React.ReactNode }) {
 
 export function App() {
   return (
-    <SessionProvider>
+    <SessionBootstrap>
       <Shell>
         <Routes>
           <Route path="/" element={<LandingPage />} />
-          <Route path="/login" element={<LoginPage />} />
-          <Route
-            path="/jobs"
-            element={
-              <RequireAuth>
-                <JobsPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/jobs/:jobId"
-            element={
-              <RequireAuth>
-                <JobPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/new"
-            element={
-              <RequireAuth>
-                <NewJobPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/settings"
-            element={
-              <RequireAuth>
-                <SettingsPage />
-              </RequireAuth>
-            }
-          />
+          <Route path="/login" element={<Navigate to="/jobs" replace />} />
+          <Route path="/jobs" element={<JobsPage />} />
+          <Route path="/jobs/:jobId" element={<JobPage />} />
+          <Route path="/new" element={<NewJobPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Shell>
-    </SessionProvider>
+    </SessionBootstrap>
   );
 }

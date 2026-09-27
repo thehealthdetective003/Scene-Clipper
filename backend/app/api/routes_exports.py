@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 import zipfile
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Query, Response, status
+from sqlalchemy import select
 from starlette.responses import StreamingResponse
 
 from app.api.deps import AuthDep, CsrfDep, DbDep, RequestIdDep, SettingsDep
@@ -15,11 +19,48 @@ from app.api.serializers import export_file_model, export_response
 from app.api.streaming import stream_file
 from app.exporting import bundle
 from app.exporting import manifest as manifest_module
-from app.schemas import CreateExportRequest, ExportFilesResponse, ExportResponse
+from app.models import CandidateShot
+from app.schemas import (
+    CreateExportRequest,
+    ExportFilesResponse,
+    ExportResponse,
+    SourceBundleModel,
+)
 from app.services import audit, exports, idempotency, jobs, storage
 from app.workers.queue import enqueue_export
 
 router = APIRouter(tags=["exports"])
+
+_ZIP_SUFFIX = re.compile(r"\.zip$", re.IGNORECASE)
+_UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._ -]+")
+_SEPARATOR_RUN = re.compile(r"[\s-]+")
+
+
+def _safe_zip_name(requested: str | None, fallback: str) -> str:
+    """Return an ASCII attachment name that cannot inject response headers."""
+    value = _ZIP_SUFFIX.sub("", (requested or fallback).strip())
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    value = _UNSAFE_FILENAME.sub("-", value)
+    value = _SEPARATOR_RUN.sub("-", value).strip(" .-_")
+    return f"{(value[:96] or 'scene-clips')}.zip"
+
+
+def _source_display_name(source_name: str | None, source_file_name: str) -> str:
+    return source_name or Path(source_file_name).stem or "source-clips"
+
+
+def _source_zip_names(source_pairs) -> dict[str, str]:  # noqa: ANN001 - ORM tuple collection
+    """Build stable, unique archive names in the job's source order."""
+    names: dict[str, str] = {}
+    occurrences: dict[str, int] = {}
+    for source, upload in source_pairs:
+        base = _safe_zip_name(
+            None, _source_display_name(source.source_name, upload.file_name)
+        ).removesuffix(".zip")
+        occurrences[base] = occurrences.get(base, 0) + 1
+        suffix = f"-{occurrences[base]}" if occurrences[base] > 1 else ""
+        names[source.id] = f"{base}{suffix}.zip"
+    return names
 
 
 @router.post(
@@ -154,15 +195,53 @@ def list_export_files(
     jobs.get_job(db, job_id)
     export = exports.get_export(db, job_id, export_id)
 
+    rows = exports.list_files(db, export.id)
+    candidate_ids = {row.candidate_id for row in rows}
+    candidates = {
+        candidate.id: candidate
+        for candidate in db.execute(
+            select(CandidateShot).where(CandidateShot.id.in_(candidate_ids))
+        ).scalars()
+    }
+    availability: dict[str, bool] = {}
     files = []
-    for row in exports.list_files(db, export.id):
+    for row in rows:
         # Exports produced before individual clips were published still have
         # their rows, but only the archive exists on disk.
         try:
             available = storage.resolve(row.relative_path, settings).is_file()
         except storage.UnsafePathError:
             available = False
-        files.append(export_file_model(row, available=available))
+        availability[row.id] = available
+        candidate = candidates.get(row.candidate_id)
+        if candidate is not None:
+            files.append(export_file_model(row, candidate, available=available))
+
+    base = f"/api/v1/jobs/{job_id}/exports/{export_id}"
+    source_pairs = jobs.sources_for(db, job_id)
+    source_zip_names = _source_zip_names(source_pairs)
+    source_bundles: list[SourceBundleModel] = []
+    for source, upload in source_pairs:
+        source_rows = [
+            row
+            for row in rows
+            if (candidate := candidates.get(row.candidate_id)) is not None
+            and candidate.source_id == source.id
+        ]
+        if not source_rows:
+            continue
+        source_bundles.append(
+            SourceBundleModel(
+                source_id=source.id,
+                source_name=source.source_name,
+                source_file_name=upload.file_name,
+                file_name=source_zip_names[source.id],
+                file_count=len(source_rows),
+                size_bytes=sum(row.size_bytes for row in source_rows),
+                available=all(availability.get(row.id, False) for row in source_rows),
+                download_url=f"{base}/sources/{source.id}/download",
+            )
+        )
 
     return ExportFilesResponse(
         files=files,
@@ -171,6 +250,7 @@ def list_export_files(
             if export.state == "complete" and export.zip_relative_path
             else None
         ),
+        source_bundles=source_bundles,
     )
 
 
@@ -213,6 +293,7 @@ def download_export_bundle(
     settings: SettingsDep,
     auth: AuthDep,
     group: Annotated[list[str], Query()] = [],  # noqa: B006 - FastAPI query list
+    name: Annotated[str | None, Query(max_length=120)] = None,
 ) -> Response:
     """Stream a ZIP of exactly the selected clips.
 
@@ -263,13 +344,95 @@ def download_export_bundle(
     entries.sort(key=lambda entry: entry.arcname)
     extras = _bundle_manifests(export, entries, settings)
 
+    return _stream_bundle(
+        entries,
+        extras,
+        download_name=_safe_zip_name(
+            name, f"scene-clips-{job_id}-{export_id}-{len(entries)}"
+        ),
+    )
+
+
+@router.get("/jobs/{job_id}/exports/{export_id}/sources/{source_id}/download")
+def download_source_bundle(
+    job_id: str,
+    export_id: str,
+    source_id: str,
+    db: DbDep,
+    settings: SettingsDep,
+    auth: AuthDep,
+    name: Annotated[str | None, Query(max_length=120)] = None,
+) -> Response:
+    """Stream every exported clip for one source as its own ZIP."""
+    jobs.get_job(db, job_id)
+    export = exports.get_export(db, job_id, export_id)
+    source_pairs = jobs.sources_for(db, job_id)
+    source_pair = next(
+        (
+            (source, upload)
+            for source, upload in source_pairs
+            if source.id == source_id
+        ),
+        None,
+    )
+    if source_pair is None:
+        raise not_found("job source")
+    source, _upload = source_pair
+
+    candidate_ids = set(
+        db.execute(
+            select(CandidateShot.id).where(
+                CandidateShot.job_id == job_id,
+                CandidateShot.source_id == source_id,
+            )
+        ).scalars()
+    )
+    rows = [
+        row
+        for row in exports.list_files(db, export.id)
+        if row.candidate_id in candidate_ids
+    ]
+    if not rows:
+        raise not_found("export files")
+
+    entries: list[bundle.BundleEntry] = []
+    missing: list[str] = []
+    for row in rows:
+        try:
+            path = storage.resolve(row.relative_path, settings)
+        except storage.UnsafePathError:
+            missing.append(row.archive_path)
+            continue
+        if not path.is_file():
+            missing.append(row.archive_path)
+            continue
+        entries.append(bundle.BundleEntry(arcname=row.archive_path, path=path))
+
+    if missing:
+        raise conflict(
+            "selection_unavailable",
+            "Some clips for this source are no longer available. Re-export the job.",
+            {"missing": sorted(missing)[:20], "missingCount": len(missing)},
+        )
+
+    entries.sort(key=lambda entry: entry.arcname)
+    return _stream_bundle(
+        entries,
+        _bundle_manifests(export, entries, settings),
+        download_name=_safe_zip_name(name, _source_zip_names(source_pairs)[source.id]),
+    )
+
+
+def _stream_bundle(
+    entries: list[bundle.BundleEntry],
+    extras: list[tuple[str, bytes]],
+    *,
+    download_name: str,
+) -> StreamingResponse:
     headers = {
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
-        # Built from server-side identifiers only (spec 10.2).
-        "Content-Disposition": (
-            f'attachment; filename="scene-clips-{job_id}-{export_id}-{len(entries)}.zip"'
-        ),
+        "Content-Disposition": f'attachment; filename="{download_name}"',
         # The archive is produced as it streams, so its length is not known
         # up front and range requests cannot be served from it.
         "Accept-Ranges": "none",
@@ -323,6 +486,7 @@ def download_export(
     settings: SettingsDep,
     auth: AuthDep,
     range_header: str | None = Header(default=None, alias="Range"),
+    name: Annotated[str | None, Query(max_length=120)] = None,
 ) -> Response:
     """Stream the completed ZIP with range support (spec 8.5)."""
     jobs.get_job(db, job_id)
@@ -334,6 +498,5 @@ def download_export(
         storage.resolve(export.zip_relative_path, settings),
         media_type="application/zip",
         range_header=range_header,
-        # Built from server-side identifiers only (spec 10.2).
-        download_name=f"scene-clips-{job_id}-{export_id}.zip",
+        download_name=_safe_zip_name(name, f"scene-clips-{job_id}-{export_id}"),
     )

@@ -203,6 +203,12 @@ class Upload(Base, TimestampMixin):
     chunk_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     state: Mapped[str] = mapped_column(String(32), default="created", nullable=False, index=True)
 
+    #: ``file`` for browser uploads, ``url`` for yt-dlp imports.  A remote URL
+    #: is worker-only metadata: it is never returned by an API serializer or
+    #: placed in a Redis queue payload.
+    source_kind: Mapped[str] = mapped_column(String(16), default="file", nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     #: Authoritative server-computed digest, set at completion.
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     #: Optional client-declared digest, used only for a mismatch check.
@@ -217,6 +223,7 @@ class Upload(Base, TimestampMixin):
     deleted_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     jobs: Mapped[list["Job"]] = relationship(back_populates="upload")
+    job_sources: Mapped[list["JobSource"]] = relationship(back_populates="upload")
 
     @property
     def relative_dir(self) -> str:
@@ -247,6 +254,9 @@ class Job(Base, TimestampMixin):
     source_name: Mapped[str | None] = mapped_column(String(48), nullable=True)
     source_label_style: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     use_gemini: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    #: When false, candidates are left unselected in source order for a fully
+    #: manual review.  This is distinct from local-only ranking.
+    ranking_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     gemini_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     gemini_request_cap: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     detector_config_version: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -277,6 +287,11 @@ class Job(Base, TimestampMixin):
     cleanup_completed_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     upload: Mapped[Upload] = relationship(back_populates="jobs")
+    sources: Mapped[list["JobSource"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="JobSource.order_index",
+    )
     usage: Mapped["AnalysisUsage"] = relationship(
         back_populates="job", uselist=False, cascade="all, delete-orphan"
     )
@@ -284,6 +299,36 @@ class Job(Base, TimestampMixin):
     @property
     def relative_dir(self) -> str:
         return f"jobs/{self.id}"
+
+
+class JobSource(Base, TimestampMixin):
+    """One independently configured source video inside a job."""
+
+    __tablename__ = "job_sources"
+    __table_args__ = (
+        UniqueConstraint("job_id", "order_index", name="uq_job_sources_order"),
+        UniqueConstraint("job_id", "upload_id", name="uq_job_sources_upload"),
+        Index("ix_job_sources_job", "job_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), nullable=False)
+    upload_id: Mapped[str] = mapped_column(ForeignKey("uploads.id"), nullable=False, index=True)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_name: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    source_label_style: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    content_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_prompt_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    checkpoint: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), default="queued", nullable=False)
+    detected_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    eligible_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    job: Mapped[Job] = relationship(back_populates="sources")
+    upload: Mapped[Upload] = relationship(back_populates="job_sources")
 
 
 class JobEvent(Base):
@@ -308,11 +353,16 @@ class DetectedShot(Base):
 
     __tablename__ = "detected_shots"
     __table_args__ = (
-        UniqueConstraint("job_id", "shot_number", name="uq_detected_shots_job_number"),
+        UniqueConstraint(
+            "source_id", "shot_number", name="uq_detected_shots_source_number"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("job_sources.id"), nullable=False, index=True
+    )
     shot_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
     source_start_us: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -339,8 +389,13 @@ class CandidateShot(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("job_sources.id"), nullable=False, index=True
+    )
     detected_shot_id: Mapped[str] = mapped_column(ForeignKey("detected_shots.id"), nullable=False)
     shot_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_name: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    source_file_name: Mapped[str] = mapped_column(String(512), nullable=False)
 
     source_start_us: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_end_us: Mapped[int] = mapped_column(BigInteger, nullable=False)

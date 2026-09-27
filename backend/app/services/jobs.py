@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from app.api.errors import conflict, invalid_job_state, not_found, validation_error
 from app.config import Settings as AppSettings
-from app.models import AnalysisUsage, Export, Job, Upload, utcnow
+from app.models import AnalysisUsage, Export, Job, JobSource, Upload, utcnow
 from app.services import events, settings_service
 from app.source_labels import normalize_source_name
 from app.versions import ANALYSIS_PIPELINE_VERSION, FEATURE_ALGORITHM_VERSION
@@ -65,7 +66,7 @@ _STAGE_FLOOR = {
 
 @dataclass(frozen=True, slots=True)
 class JobPage:
-    items: list[tuple[Job, str, Export | None]]
+    items: list[tuple[Job, str, int, Export | None]]
     next_cursor: str | None
 
 
@@ -93,24 +94,40 @@ def create_job(
     db: DbSession,
     app_settings: AppSettings,
     *,
-    upload_id: str,
+    upload_id: str | None,
     target_clip_count: int,
     content_prompt: str | None,
     source_name: str | None,
     use_gemini: bool | None,
+    ranking_enabled: bool = True,
+    sources: list[dict[str, str | None]] | None = None,
 ) -> Job:
     """Snapshot configuration so later settings changes cannot alter this run."""
-    upload = db.get(Upload, upload_id)
-    if upload is None or upload.deleted_at is not None:
-        raise not_found("upload")
-    if upload.state != "ready":
-        raise conflict(
-            "upload_not_ready",
-            "The upload must finish verifying before a job can start.",
-            {"uploadState": upload.state},
+    source_inputs = sources or [
+        {"upload_id": upload_id, "content_prompt": content_prompt, "source_name": source_name}
+    ]
+    upload_ids = [str(item.get("upload_id") or "") for item in source_inputs]
+    if not upload_ids or any(not value for value in upload_ids):
+        raise validation_error("invalid_job_sources", "Add at least one source video.")
+    if len(set(upload_ids)) != len(upload_ids):
+        raise validation_error(
+            "duplicate_job_source", "The same video cannot be added to a job twice."
         )
-    if not upload.sha256:
-        raise conflict("upload_not_ready", "The upload has no verified checksum yet.")
+
+    source_uploads: list[Upload] = []
+    for source_upload_id in upload_ids:
+        upload = db.get(Upload, source_upload_id)
+        if upload is None or upload.deleted_at is not None:
+            raise not_found("upload")
+        if upload.state != "ready":
+            raise conflict(
+                "upload_not_ready",
+                "Every source must finish verifying before the job can start.",
+                {"uploadId": upload.id, "uploadState": upload.state},
+            )
+        if not upload.sha256:
+            raise conflict("upload_not_ready", "A source has no verified checksum yet.")
+        source_uploads.append(upload)
     if not 1 <= target_clip_count <= 100:
         raise validation_error(
             "invalid_target_clip_count", "targetClipCount must be between 1 and 100."
@@ -120,19 +137,35 @@ def create_job(
     key_configured = settings_service.any_key_configured(db)
 
     # useGemini defaults to true when a key is configured, false otherwise.
-    resolved_use_gemini = key_configured if use_gemini is None else bool(use_gemini)
+    resolved_use_gemini = (
+        (key_configured if use_gemini is None else bool(use_gemini))
+        if ranking_enabled
+        else False
+    )
     if resolved_use_gemini and not key_configured:
         # Not an error: the job runs locally and reports the fallback reason.
         resolved_use_gemini = False
 
-    normalized = normalize_prompt(content_prompt)
-    normalized_source_name = normalize_source_name(source_name)
+    first_input = source_inputs[0]
+    first_prompt = first_input.get("content_prompt")
+    first_name = first_input.get("source_name")
+    normalized = normalize_prompt(first_prompt)
+    normalized_source_name = normalize_source_name(first_name)
+    source_digest = (
+        source_uploads[0].sha256
+        if len(source_uploads) == 1
+        else hashlib.sha256(
+            "\0".join(str(item.sha256) for item in source_uploads).encode("ascii")
+        ).hexdigest()
+    )
     job = Job(
-        upload_id=upload.id,
+        # Legacy single-source columns mirror the first source so old clients,
+        # cache records, and already-created jobs remain readable.
+        upload_id=source_uploads[0].id,
         state="uploaded",
-        source_sha256=upload.sha256,
+        source_sha256=source_digest,
         target_clip_count=target_clip_count,
-        content_prompt=content_prompt.strip() if content_prompt else None,
+        content_prompt=first_prompt.strip() if first_prompt else None,
         content_prompt_normalized=normalized,
         source_name=normalized_source_name,
         source_label_style=(
@@ -141,6 +174,7 @@ def create_job(
             else None
         ),
         use_gemini=resolved_use_gemini,
+        ranking_enabled=ranking_enabled,
         gemini_model=settings_row.gemini_model if resolved_use_gemini else None,
         gemini_request_cap=settings_row.gemini_request_cap if resolved_use_gemini else 0,
         detector_config_version=app_settings.detector_config_version,
@@ -154,6 +188,28 @@ def create_job(
     db.add(job)
     db.flush()
 
+    style = settings_service.source_label_style(settings_row)
+    for order, (source_input, upload) in enumerate(
+        zip(source_inputs, source_uploads, strict=True)
+    ):
+        configured_name = normalize_source_name(source_input.get("source_name"))
+        configured_prompt = source_input.get("content_prompt")
+        db.add(
+            JobSource(
+                job_id=job.id,
+                upload_id=upload.id,
+                order_index=order,
+                source_sha256=str(upload.sha256),
+                source_name=configured_name,
+                source_label_style=style if configured_name is not None else None,
+                content_prompt=configured_prompt.strip() if configured_prompt else None,
+                content_prompt_normalized=normalize_prompt(configured_prompt),
+                state="queued",
+            )
+        )
+        upload.reference_count += 1
+    db.flush()
+
     db.add(
         AnalysisUsage(
             job_id=job.id,
@@ -161,11 +217,7 @@ def create_job(
             request_cap=job.gemini_request_cap,
         )
     )
-    # A ready upload may back multiple jobs; reference-count its source file.
-    upload.reference_count += 1
-    db.flush()
-
-    if not key_configured and (use_gemini is True):
+    if ranking_enabled and not key_configured and (use_gemini is True):
         add_warning(job, "gemini_key_not_configured")
 
     events.append(db, job.id, events.JOB_UPDATED, {"state": job.state, "percent": 0.0})
@@ -201,6 +253,20 @@ def usage_for(db: DbSession, job_id: str) -> AnalysisUsage | None:
     return db.get(AnalysisUsage, job_id)
 
 
+def sources_for(db: DbSession, job_id: str) -> list[tuple[JobSource, Upload]]:
+    rows = list(
+        db.execute(
+            select(JobSource).where(JobSource.job_id == job_id).order_by(JobSource.order_index)
+        ).scalars()
+    )
+    result: list[tuple[JobSource, Upload]] = []
+    for source in rows:
+        upload = db.get(Upload, source.upload_id)
+        if upload is not None:
+            result.append((source, upload))
+    return result
+
+
 def encode_cursor(job_id: str) -> str:
     return base64.urlsafe_b64encode(job_id.encode("utf-8")).decode("ascii").rstrip("=")
 
@@ -228,12 +294,22 @@ def list_jobs(db: DbSession, *, cursor: str | None, limit: int) -> JobPage:
     has_more = len(rows) > limit
     rows = rows[:limit]
 
-    items: list[tuple[Job, str, Export | None]] = []
+    items: list[tuple[Job, str, int, Export | None]] = []
     for job in rows:
-        upload = db.get(Upload, job.upload_id)
-        items.append((job, upload.file_name if upload else "(deleted source)", latest_export(db, job.id)))
+        sources = sources_for(db, job.id)
+        first_name = sources[0][1].file_name if sources else "(deleted source)"
+        source_count = len(sources) or 1
+        display_name = (
+            first_name if source_count == 1 else f"{first_name} + {source_count - 1} more"
+        )
+        items.append(
+            (job, display_name, source_count, latest_export(db, job.id))
+        )
 
-    return JobPage(items=items, next_cursor=encode_cursor(rows[-1].id) if has_more and rows else None)
+    return JobPage(
+        items=items,
+        next_cursor=encode_cursor(rows[-1].id) if has_more and rows else None,
+    )
 
 
 # --- State transitions -----------------------------------------------------
@@ -414,9 +490,13 @@ def tombstone(db: DbSession, job: Job) -> None:
     job.deleted_at = utcnow()
     job.cancel_requested = True
     job.updated_at = utcnow()
-    upload = db.get(Upload, job.upload_id)
-    if upload is not None and upload.reference_count > 0:
-        upload.reference_count -= 1
+    source_upload_ids = {source.upload_id for source, _upload in sources_for(db, job.id)}
+    if not source_upload_ids:
+        source_upload_ids = {job.upload_id}
+    for source_upload_id in source_upload_ids:
+        upload = db.get(Upload, source_upload_id)
+        if upload is not None and upload.reference_count > 0:
+            upload.reference_count -= 1
     db.flush()
 
 

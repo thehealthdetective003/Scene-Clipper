@@ -15,6 +15,7 @@ import type {
   GeminiKeyTestResult,
   GeminiSettings,
   Job,
+  JobSourceInput,
   JobList,
   Resolution,
   ReviewClipInput,
@@ -131,16 +132,6 @@ export const api = {
     return info;
   },
 
-  async login(username: string, password: string): Promise<void> {
-    await request<void>("/auth/login", { method: "POST", body: { username, password } });
-    await api.session();
-  },
-
-  async logout(): Promise<void> {
-    await request<void>("/auth/logout", { method: "POST" });
-    csrfToken = null;
-  },
-
   // --- Settings ------------------------------------------------------------
 
   sourceLabelSettings(): Promise<SourceLabelSettings> {
@@ -230,6 +221,14 @@ export const api = {
     return request<Upload>("/uploads", {
       method: "POST",
       body: { fileName, sizeBytes, mimeType },
+      idempotencyKey,
+    });
+  },
+
+  createUrlUpload(url: string, idempotencyKey: string): Promise<Upload> {
+    return request<Upload>("/uploads/from-url", {
+      method: "POST",
+      body: { url },
       idempotencyKey,
     });
   },
@@ -329,6 +328,20 @@ export const api = {
     });
   },
 
+  createMultiSourceJob(
+    sources: JobSourceInput[],
+    targetClipCount: number,
+    rankingEnabled: boolean,
+    useGemini: boolean,
+    idempotencyKey: string,
+  ): Promise<Job> {
+    return request<Job>("/jobs", {
+      method: "POST",
+      body: { sources, targetClipCount, rankingEnabled, useGemini },
+      idempotencyKey,
+    });
+  },
+
   getJob(jobId: string): Promise<Job> {
     return request<Job>(`/jobs/${jobId}`);
   },
@@ -391,8 +404,9 @@ export const api = {
     return request<ExportFilesResponse>(`/jobs/${jobId}/exports/${exportId}/files`);
   },
 
-  downloadUrl(jobId: string, exportId: string): string {
-    return `${BASE}/jobs/${jobId}/exports/${exportId}/download`;
+  downloadUrl(jobId: string, exportId: string, name?: string): string {
+    const query = name ? `?name=${encodeURIComponent(name)}` : "";
+    return `${BASE}/jobs/${jobId}/exports/${exportId}/download${query}`;
   },
 
   /**
@@ -402,8 +416,16 @@ export const api = {
    * so the browser's own download manager handles it — no blob is buffered in
    * the page, which matters when a selection runs to gigabytes.
    */
-  bundleUrl(jobId: string, exportId: string, groups: string[]): string {
-    const query = groups.map((group) => `group=${encodeURIComponent(group)}`).join("&");
+  bundleUrl(jobId: string, exportId: string, groups: string[], name?: string): string {
+    const params = new URLSearchParams();
+    groups.forEach((group) => params.append("group", group));
+    if (name) params.set("name", name);
+    const query = params.toString();
     return `${BASE}/jobs/${jobId}/exports/${exportId}/bundle?${query}`;
+  },
+
+  sourceBundleUrl(jobId: string, exportId: string, sourceId: string, name?: string): string {
+    const query = name ? `?name=${encodeURIComponent(name)}` : "";
+    return `${BASE}/jobs/${jobId}/exports/${exportId}/sources/${sourceId}/download${query}`;
   },
 };

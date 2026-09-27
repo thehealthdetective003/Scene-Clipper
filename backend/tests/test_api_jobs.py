@@ -47,6 +47,22 @@ def make_job(file_name: str = "clip.mp4") -> str:
         return job.id
 
 
+def make_ready_upload(file_name: str, digest: str) -> str:
+    with session_scope() as db:
+        upload = Upload(
+            file_name=file_name,
+            declared_size_bytes=1024,
+            verified_offset_bytes=1024,
+            chunk_size_bytes=1024,
+            state="ready",
+            sha256=digest,
+            storage_ext="mp4",
+        )
+        db.add(upload)
+        db.flush()
+        return upload.id
+
+
 class TestListing:
     def test_empty_listing(self, auth_client):
         body = auth_client.get(JOBS).json()
@@ -236,6 +252,75 @@ class TestEventLedger:
 
 
 class TestJobCreationValidation:
+    def test_multi_source_configuration_is_independent(self, auth_client):
+        first = make_ready_upload("first.mp4", "a" * 64)
+        second = make_ready_upload("second.mp4", "b" * 64)
+
+        response = auth_client.post(
+            JOBS,
+            json={
+                "sources": [
+                    {
+                        "uploadId": first,
+                        "sourceName": "Factory A",
+                        "contentPrompt": "  focus on red machines  ",
+                    },
+                    {
+                        "uploadId": second,
+                        "sourceName": "Factory B",
+                        "contentPrompt": "focus on blue machines",
+                    },
+                ],
+                "rankingEnabled": False,
+                "useGemini": True,
+            },
+        )
+
+        assert response.status_code == 202, response.text
+        body = response.json()
+        assert body["rankingEnabled"] is False
+        assert body["useGemini"] is False
+        assert [source["fileName"] for source in body["sources"]] == [
+            "first.mp4",
+            "second.mp4",
+        ]
+        assert [source["sourceName"] for source in body["sources"]] == [
+            "FACTORY A",
+            "FACTORY B",
+        ]
+        assert [source["contentPrompt"] for source in body["sources"]] == [
+            "focus on red machines",
+            "focus on blue machines",
+        ]
+
+        listing = auth_client.get(JOBS).json()["items"][0]
+        assert listing["sourceCount"] == 2
+        assert listing["sourceFileName"] == "first.mp4 + 1 more"
+
+        with session_scope() as db:
+            assert db.get(Upload, first).reference_count == 1
+            assert db.get(Upload, second).reference_count == 1
+
+    def test_job_requires_exactly_one_source_shape(self, auth_client):
+        upload_id = make_ready_upload("source.mp4", "c" * 64)
+        assert auth_client.post(JOBS, json={}).status_code == 422
+        assert (
+            auth_client.post(
+                JOBS,
+                json={"uploadId": upload_id, "sources": [{"uploadId": upload_id}]},
+            ).status_code
+            == 422
+        )
+
+    def test_duplicate_multi_source_is_rejected(self, auth_client):
+        upload_id = make_ready_upload("source.mp4", "d" * 64)
+        response = auth_client.post(
+            JOBS,
+            json={"sources": [{"uploadId": upload_id}, {"uploadId": upload_id}]},
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "duplicate_job_source"
+
     def test_upload_must_be_ready(self, auth_client):
         with session_scope() as db:
             upload = Upload(

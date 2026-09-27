@@ -7,10 +7,8 @@
 
 name: scene-clipper
 
-# Secrets reach the containers through env_file rather than ${VAR} substitution.
-# Compose interpolates values it substitutes, and an Argon2id PHC hash is full of
-# '$' ($argon2id$v=19$m=...), which would be eaten as variable references.
-# env_file values are passed through literally, so no escaping is needed.
+# Deployment values reach the containers through env_file rather than repeated
+# substitutions in each service definition.
 x-app-env: &app-env
   # These override anything in .env: they describe the container topology, not
   # the deployment's own configuration.

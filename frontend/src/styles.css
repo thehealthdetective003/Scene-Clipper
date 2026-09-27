@@ -155,6 +155,54 @@
   }
 }
 
+/* Dark mode keeps the blue brand identity while shifting every neutral and
+   semantic surface onto a deep, slightly cool canvas. These are the same
+   tokens consumed by the Tailwind utilities, so the whole app switches as a
+   single design system instead of carrying theme-specific markup. */
+:root[data-theme="dark"] {
+  --color-ink-900: #f4f7fc;
+  --color-ink-800: #e4eaf4;
+  --color-ink-700: #ccd5e4;
+  --color-ink-600: #adb9cc;
+  --color-ink-500: #8e9db4;
+  --color-ink-400: #71819b;
+  --color-ink-300: #576982;
+  --color-ink-200: #3d506a;
+
+  --color-paper: #0d192a;
+  --color-canvas: #07101f;
+  --color-canvas-2: #111f33;
+  --color-line: #1b2b43;
+  --color-line-strong: #2a3d58;
+
+  --color-navy-50: #10233d;
+  --color-navy-100: #173453;
+  --color-navy-200: #254b70;
+  --color-azure-50: #09283d;
+  --color-azure-100: #0d3954;
+  --color-azure-200: #175371;
+  --color-azure-700: #62caff;
+  --color-azure-800: #8bd9ff;
+
+  --color-ok-50: #0a2821;
+  --color-ok-100: #104237;
+  --color-ok-600: #58d6a5;
+  --color-warn-50: #2b210e;
+  --color-warn-100: #493515;
+  --color-warn-600: #f0b950;
+  --color-bad-50: #30151d;
+  --color-bad-100: #51202c;
+  --color-bad-600: #ff8194;
+
+  --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.24), 0 6px 16px -8px rgb(0 0 0 / 0.48);
+  --shadow-card: 0 1px 1px rgb(255 255 255 / 0.025), 0 12px 30px -16px rgb(0 0 0 / 0.7),
+    0 28px 56px -36px rgb(0 0 0 / 0.82);
+  --shadow-lift: 0 2px 3px rgb(0 0 0 / 0.32), 0 18px 40px -14px rgb(0 0 0 / 0.76),
+    0 40px 72px -36px rgb(0 0 0 / 0.86);
+  --shadow-float: 0 24px 64px -24px rgb(0 0 0 / 0.78), 0 8px 22px -8px rgb(0 0 0 / 0.56);
+  --shadow-navy: 0 12px 34px -12px rgb(0 0 0 / 0.72);
+}
+
 @layer base {
   * {
     border-color: var(--color-line);
@@ -174,6 +222,16 @@
     font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    transition: background-color 180ms ease, color 180ms ease;
+  }
+
+  html[data-theme="dark"] { color-scheme: dark; }
+
+  html[data-theme="dark"] body {
+    background-image:
+      radial-gradient(circle at 15% -10%, rgb(0 163 250 / 0.08), transparent 34rem),
+      radial-gradient(circle at 92% 18%, rgb(28 80 166 / 0.08), transparent 30rem);
+    background-attachment: fixed;
   }
 
   h1, h2, h3, h4 {
@@ -226,7 +284,7 @@
     margin-top: -6px;
     border-radius: 999px;
     background: var(--color-azure-500);
-    border: 2.5px solid #fff;
+    border: 2.5px solid var(--color-paper);
     box-shadow: 0 1px 4px rgb(6 34 84 / 0.25), 0 0 0 3px rgb(0 163 250 / 0.16);
   }
   input[type="range"]:disabled::-webkit-slider-thumb {
@@ -241,7 +299,7 @@
   input[type="range"]::-moz-range-thumb {
     height: 17px;
     width: 17px;
-    border: 2.5px solid #fff;
+    border: 2.5px solid var(--color-paper);
     border-radius: 999px;
     background: var(--color-azure-500);
     box-shadow: 0 1px 4px rgb(6 34 84 / 0.25);
@@ -261,7 +319,7 @@
 
 /** Frosted white panel used for sticky bars and overlay cards. */
 @utility glass {
-  background: rgb(255 255 255 / 0.72);
+  background: color-mix(in srgb, var(--color-paper) 78%, transparent);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
 }
@@ -282,7 +340,7 @@
 
 /** Hairline top highlight that makes a white card feel lit from above. */
 @utility card-sheen {
-  box-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.9), var(--shadow-card);
+  box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--color-ink-900) 9%, transparent), var(--shadow-card);
 }
 
 /** Display type: tight tracking at large sizes, like the reference. */
@@ -290,4 +348,12 @@
   font-family: var(--font-display);
   letter-spacing: -0.035em;
   line-height: 0.98;
+}
+
+:root[data-theme="dark"] .text-brand-gradient {
+  background-image: linear-gradient(115deg, #f4f7fc 5%, var(--color-azure-400) 55%, #b9cdf0 100%);
+}
+
+:root[data-theme="dark"] .dot-grid {
+  background-image: radial-gradient(circle at 1px 1px, rgb(117 208 255 / 0.11) 1px, transparent 0);
 }

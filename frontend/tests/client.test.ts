@@ -91,7 +91,7 @@ describe("api client", () => {
     setCsrfToken("csrf-secret-value");
     fetchMock.mockResolvedValue(
       jsonResponse(
-        { error: { code: "unauthorized", message: "Sign in", retryable: false, requestId: "r", details: {} } },
+        { error: { code: "unauthorized", message: "Reload the app", retryable: false, requestId: "r", details: {} } },
         401,
       ),
     );

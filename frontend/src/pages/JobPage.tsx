@@ -13,7 +13,14 @@ import type {
 import { CandidateCard } from "../components/CandidateCard";
 import { ExportPanel } from "../components/ExportPanel";
 import { Button } from "../components/ui/Button";
-import { IconAlert, IconFilm, IconRefresh, IconSparkle, IconX } from "../components/ui/Icons";
+import {
+  IconAlert,
+  IconFilm,
+  IconLayers,
+  IconRefresh,
+  IconSparkle,
+  IconX,
+} from "../components/ui/Icons";
 import {
   Alert,
   EmptyState,
@@ -108,9 +115,35 @@ export function JobPage() {
 
   const ordered = useMemo(() => {
     const copy = [...candidates];
-    copy.sort((a, b) => (order === "rank" ? a.rank - b.rank : a.sourceStartUs - b.sourceStartUs));
+    const sourceOrder = new Map(job?.sources.map((source) => [source.id, source.order]) ?? []);
+    copy.sort((a, b) => {
+      if (order === "rank") return a.rank - b.rank;
+      const sourceDifference =
+        (sourceOrder.get(a.sourceId) ?? 0) - (sourceOrder.get(b.sourceId) ?? 0);
+      return sourceDifference || a.sourceStartUs - b.sourceStartUs;
+    });
     return copy;
-  }, [candidates, order]);
+  }, [candidates, job?.sources, order]);
+
+  const candidateGroups = useMemo(() => {
+    const grouped = (job?.sources ?? []).map((source) => ({
+      id: source.id,
+      name: source.sourceName || source.fileName,
+      fileName: source.fileName,
+      candidates: ordered.filter((candidate) => candidate.sourceId === source.id),
+    }));
+    const known = new Set(grouped.map((group) => group.id));
+    const unmatched = ordered.filter((candidate) => !known.has(candidate.sourceId));
+    if (unmatched.length > 0) {
+      grouped.push({
+        id: "unmatched",
+        name: "Other source",
+        fileName: unmatched[0]?.sourceFileName ?? "Source video",
+        candidates: unmatched,
+      });
+    }
+    return grouped.filter((group) => group.candidates.length > 0);
+  }, [job?.sources, ordered]);
 
   /** Push the current selection to the server; a stale revision reloads state. */
   const submit = async (next: SelectedClip[]) => {
@@ -239,7 +272,11 @@ export function JobPage() {
               <h1 className="text-xl font-semibold tracking-tight text-ink-900 sm:text-2xl">
                 {job.progress.message || stateLabel(job.state)}
               </h1>
-              {job.video && (
+              {job.sources.length > 1 ? (
+                <p className="mt-1.5 text-sm text-ink-500">
+                  {job.sources.length} independently configured source videos
+                </p>
+              ) : job.video && (
                 <p className="mt-1.5 text-sm text-ink-500">
                   {job.video.width}×{job.video.height} · {job.video.averageFrameRate} fps ·{" "}
                   {job.video.hasAudio ? "with audio" : "silent"}
@@ -367,12 +404,16 @@ export function JobPage() {
                     Review · {clips.length} selected of {candidates.length}
                   </h2>
                   <p className="mt-0.5 text-xs text-ink-400">
-                    Drag a selected clip onto another to reorder. Files are renumbered from 0001 at
-                    export.
+                    Every source has its own section. Drag a selected clip onto another to reorder;
+                    files are renumbered from 0001 at export.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <SegmentedControl options={ORDERS} value={order} onChange={setOrder} size="sm" />
+                  {job.rankingEnabled ? (
+                    <SegmentedControl options={ORDERS} value={order} onChange={setOrder} size="sm" />
+                  ) : (
+                    <span className="text-xs font-medium text-ink-400">Manual selection</span>
+                  )}
                   <Button variant="outline" size="sm" onClick={() => void submit(clips)} loading={busy}>
                     Save trims
                   </Button>
@@ -390,25 +431,55 @@ export function JobPage() {
               />
             </div>
           ) : (
-            <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
-              {ordered.map((candidate, index) => (
-                <Rise key={candidate.id} delay={Math.min(index * 0.03, 0.25)}>
-                  <CandidateCard
-                    candidate={candidate}
-                    clip={clipByCandidate.get(candidate.id) ?? null}
-                    order={clipByCandidate.get(candidate.id)?.order ?? null}
-                    busy={busy}
-                    onToggle={toggle}
-                    onTrim={trim}
-                    onRestore={restore}
-                    onMove={move}
-                    onDragStart={(id) => {
-                      dragged.current = id;
-                    }}
-                    onDropOn={dropOn}
-                  />
-                </Rise>
-              ))}
+            <div className="space-y-7">
+              {candidateGroups.map((group, groupIndex) => {
+                const selectedInSource = group.candidates.filter((candidate) =>
+                  clipByCandidate.has(candidate.id),
+                ).length;
+                return (
+                  <Rise key={group.id} delay={Math.min(groupIndex * 0.04, 0.16)}>
+                    <section className="rounded-panel border border-line bg-paper/60 p-4 shadow-soft sm:p-5">
+                      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <span className="grid size-10 flex-none place-items-center rounded-xl bg-navy-50 text-azure-700">
+                            <IconLayers style={{ height: 18, width: 18 }} />
+                          </span>
+                          <div className="min-w-0">
+                            <h3 className="truncate text-sm font-semibold text-ink-900">
+                              {group.name}
+                            </h3>
+                            <p className="truncate text-xs text-ink-400">{group.fileName}</p>
+                          </div>
+                        </div>
+                        <span className="rounded-full border border-line bg-canvas px-3 py-1 text-xs font-medium text-ink-500">
+                          {selectedInSource} selected · {group.candidates.length} shot
+                          {group.candidates.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+                        {group.candidates.map((candidate, index) => (
+                          <Rise key={candidate.id} delay={Math.min(index * 0.025, 0.18)}>
+                            <CandidateCard
+                              candidate={candidate}
+                              clip={clipByCandidate.get(candidate.id) ?? null}
+                              order={clipByCandidate.get(candidate.id)?.order ?? null}
+                              busy={busy}
+                              onToggle={toggle}
+                              onTrim={trim}
+                              onRestore={restore}
+                              onMove={move}
+                              onDragStart={(id) => {
+                                dragged.current = id;
+                              }}
+                              onDropOn={dropOn}
+                            />
+                          </Rise>
+                        ))}
+                      </div>
+                    </section>
+                  </Rise>
+                );
+              })}
             </div>
           )}
 

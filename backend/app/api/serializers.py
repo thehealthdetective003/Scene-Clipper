@@ -21,6 +21,7 @@ from app.schemas import (
     GeminiKeyModel,
     JobErrorModel,
     JobResponse,
+    JobSourceModel,
     JobSummaryModel,
     ProgressModel,
     SelectedClipModel,
@@ -86,6 +87,7 @@ def upload_response(upload: models.Upload) -> UploadResponse:
         state=upload.state,  # type: ignore[arg-type]
         sha256=upload.sha256,
         progress_percent=progress_percent(upload),
+        source_kind=upload.source_kind,  # type: ignore[arg-type]
         error=error_model(upload.error),
         created_at=iso_required(upload.created_at),
         updated_at=iso_required(upload.updated_at),
@@ -165,13 +167,21 @@ def export_response(export: models.Export) -> ExportResponse:
     )
 
 
-def export_file_model(row: models.ExportFile, *, available: bool) -> ExportFileModel:
+def export_file_model(
+    row: models.ExportFile,
+    candidate: models.CandidateShot,
+    *,
+    available: bool,
+) -> ExportFileModel:
     base = f"/api/v1/jobs/{row.export.job_id}/exports/{row.export_id}"
     return ExportFileModel(
         id=row.id,
         serial=row.serial,
         resolution=row.resolution,  # type: ignore[arg-type]
         candidate_id=row.candidate_id,
+        source_id=candidate.source_id,
+        source_name=candidate.source_name,
+        source_file_name=candidate.source_file_name,
         # Built from a validated serial and a fixed folder name (spec 10.2).
         file_name=f"clip-{row.serial:04d}-{row.resolution}.mp4",
         width=row.width,
@@ -197,8 +207,46 @@ def video_model(job: models.Job) -> VideoModel | None:
     )
 
 
+def source_video_model(source: models.JobSource) -> VideoModel | None:
+    if not source.video:
+        return None
+    return VideoModel(
+        sha256=source.source_sha256,
+        duration_us=int(source.video["durationUs"]),
+        width=int(source.video["width"]),
+        height=int(source.video["height"]),
+        average_frame_rate=str(source.video["averageFrameRate"]),
+        has_audio=bool(source.video["hasAudio"]),
+    )
+
+
+def job_source_model(source: models.JobSource, upload: models.Upload) -> JobSourceModel:
+    return JobSourceModel(
+        id=source.id,
+        upload_id=source.upload_id,
+        order=source.order_index,
+        file_name=upload.file_name,
+        source_kind=upload.source_kind,  # type: ignore[arg-type]
+        source_name=source.source_name,
+        source_label=(
+            SourceLabelModel(
+                text=source.source_name,
+                style=SourceLabelStyleModel.model_validate(source.source_label_style),
+            )
+            if source.source_name and source.source_label_style
+            else None
+        ),
+        content_prompt=source.content_prompt,
+        video=source_video_model(source),
+    )
+
+
 def job_response(
-    job: models.Job, *, usage: models.AnalysisUsage | None, latest_export: models.Export | None
+    job: models.Job,
+    *,
+    usage: models.AnalysisUsage | None,
+    latest_export: models.Export | None,
+    sources: list[tuple[models.JobSource, models.Upload]],
 ) -> JobResponse:
     return JobResponse(
         id=job.id,
@@ -215,6 +263,8 @@ def job_response(
             else None
         ),
         use_gemini=job.use_gemini,
+        ranking_enabled=job.ranking_enabled,
+        sources=[job_source_model(source, upload) for source, upload in sources],
         video=video_model(job),
         progress=ProgressModel(
             phase=job.progress_phase,  # type: ignore[arg-type]
@@ -235,11 +285,16 @@ def job_response(
 
 
 def job_summary(
-    job: models.Job, *, source_file_name: str, latest_export: models.Export | None
+    job: models.Job,
+    *,
+    source_file_name: str,
+    source_count: int,
+    latest_export: models.Export | None,
 ) -> JobSummaryModel:
     return JobSummaryModel(
         id=job.id,
         source_file_name=source_file_name,
+        source_count=source_count,
         state=job.state,  # type: ignore[arg-type]
         progress_percent=round(job.progress_percent, 2),
         target_clip_count=job.target_clip_count,
@@ -255,6 +310,9 @@ def candidate_model(candidate: models.CandidateShot) -> CandidateShotModel:
     return CandidateShotModel(
         id=candidate.id,
         job_id=candidate.job_id,
+        source_id=candidate.source_id,
+        source_name=candidate.source_name,
+        source_file_name=candidate.source_file_name,
         shot_number=candidate.shot_number,
         source_start_us=candidate.source_start_us,
         source_end_us=candidate.source_end_us,

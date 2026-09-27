@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, event, pool
 
+from alembic import context
 from app.config import get_settings
 from app.models import Base
 
@@ -46,17 +46,19 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    # PRAGMAs run at connect time, on the raw DBAPI connection. Issuing them
-    # through the SQLAlchemy connection instead would open a transaction before
-    # Alembic starts its own, and the version stamp would then be rolled back at
-    # close while SQLite had already committed the DDL -- leaving a fully
-    # migrated database with an empty alembic_version table.
+    # PRAGMAs run at connect time, on the raw DBAPI connection. SQLite requires
+    # foreign-key enforcement to be disabled while Alembic's batch mode
+    # rebuilds referenced tables. Integrity is checked before this connection
+    # is accepted, and every application connection enables enforcement again.
+    # Issuing these through the SQLAlchemy connection would also open a
+    # transaction before Alembic starts its own and could roll back the version
+    # stamp after SQLite had already committed the DDL.
     @event.listens_for(connectable, "connect")
     def _set_pragmas(dbapi_connection, _record):  # noqa: ANN001
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA foreign_keys=OFF")
         finally:
             cursor.close()
 
@@ -70,6 +72,14 @@ def run_migrations_online() -> None:
         with context.begin_transaction():
             context.run_migrations()
         # SQLAlchemy 2 never autocommits; without this the stamp is discarded.
+        connection.commit()
+        violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+        connection.commit()
+        if violations:
+            raise RuntimeError(
+                f"Database migration left {len(violations)} foreign-key violation(s)."
+            )
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         connection.commit()
 
 

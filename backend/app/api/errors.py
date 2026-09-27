@@ -86,7 +86,7 @@ def unsupported_media(code: str, message: str) -> AppError:
 
 def payload_too_large(message: str) -> AppError:
     return AppError(
-        "upload_too_large", message, status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+        "upload_too_large", message, status_code=status.HTTP_413_CONTENT_TOO_LARGE
     )
 
 

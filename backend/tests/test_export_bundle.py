@@ -284,9 +284,7 @@ class TestBundleEndpoint:
 
     def test_the_bundle_requires_authentication(self, auth_client, exported):
         job_id, export_id = exported
-        # `client` and `auth_client` are one object, so the session is ended
-        # rather than a second client being made.
-        assert auth_client.post("/api/v1/auth/logout").status_code == 204
+        auth_client.cookies.clear()
         response = auth_client.get(
             bundle_url(job_id, export_id), params={"group": ["original:1"]}
         )

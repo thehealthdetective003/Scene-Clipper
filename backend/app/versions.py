@@ -9,7 +9,7 @@ previously cached results are invalidated instead of silently reused.
 from __future__ import annotations
 
 # Overall analysis pipeline: stage ordering, eligibility gate, ranking assembly.
-ANALYSIS_PIPELINE_VERSION = "1"
+ANALYSIS_PIPELINE_VERSION = "2"
 
 # Stage E deterministic local measurements and localScore weighting.
 FEATURE_ALGORITHM_VERSION = "1"
@@ -18,4 +18,4 @@ FEATURE_ALGORITHM_VERSION = "1"
 ENCRYPTION_FORMAT_VERSION = 1
 
 # Export manifest schema version (spec 9).
-MANIFEST_SCHEMA_VERSION = "1.1"
+MANIFEST_SCHEMA_VERSION = "1.2"

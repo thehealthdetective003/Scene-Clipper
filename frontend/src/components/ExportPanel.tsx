@@ -1,33 +1,45 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ApiError, api, newIdempotencyKey } from "../api/client";
-import type { ExportFile, ExportRecord, Job, Resolution } from "../api/types";
+import type { ExportFile, ExportRecord, Job, Resolution, SourceBundle } from "../api/types";
+import { cn } from "../lib/cn";
 import { formatBytes, formatDuration, stateLabel } from "../lib/format";
 import { encodeSelection, selectionBytes } from "../lib/selection";
-import { cn } from "../lib/cn";
 import { Button, ButtonLink, ShimmerButton } from "./ui/Button";
-import { IconCheck, IconDownload, IconFilm, IconRefresh, IconX } from "./ui/Icons";
+import {
+  IconArchive,
+  IconCheck,
+  IconDownload,
+  IconFilm,
+  IconFolder,
+  IconLayers,
+  IconRefresh,
+  IconX,
+} from "./ui/Icons";
 import {
   Alert,
   Badge,
   Checkbox,
+  Input,
   Progress,
   SegmentedControl,
   StatusBadge,
   Switch,
 } from "./ui/Primitives";
 
-/**
- * Gap between browser-initiated downloads when saving a selection as separate
- * MP4s. Firing them in one burst makes Chrome drop all but the first few.
- */
 const SEQUENTIAL_DOWNLOAD_GAP_MS = 600;
 
 const RESOLUTIONS: Array<{ value: Resolution; label: string; hint: string }> = [
   { value: "original", label: "Original", hint: "Source display size" },
-  { value: "max1080p", label: "Max 1080p", hint: "Fits inside 1920×1080" },
-  { value: "max720p", label: "Max 720p", hint: "Fits inside 1280×720" },
+  { value: "max1080p", label: "Max 1080p", hint: "Fits inside 1920x1080" },
+  { value: "max720p", label: "Max 720p", hint: "Fits inside 1280x720" },
 ];
+
+const RESOLUTION_LABELS: Record<Resolution, string> = {
+  original: "Original",
+  max1080p: "1080p",
+  max720p: "720p",
+};
 
 interface Props {
   job: Job;
@@ -36,11 +48,12 @@ interface Props {
   onStarted: (record: ExportRecord) => void;
 }
 
-const RESOLUTION_LABELS: Record<Resolution, string> = {
-  original: "Original",
-  max1080p: "1080p",
-  max720p: "720p",
-};
+function initialZipName(job: Job): string {
+  const sources = job.sources ?? [];
+  const first = sources[0];
+  const sourceName = first?.sourceName || first?.fileName.replace(/\.[^.]+$/, "");
+  return `${sources.length === 1 && sourceName ? sourceName : "scene-clips"}.zip`;
+}
 
 export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Props) {
   const [resolutions, setResolutions] = useState<Resolution[]>(["original"]);
@@ -48,30 +61,38 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [files, setFiles] = useState<ExportFile[]>([]);
+  const [sourceBundles, setSourceBundles] = useState<SourceBundle[]>([]);
   const [zipUrl, setZipUrl] = useState<string | null>(null);
+  const [zipName, setZipName] = useState(() => initialZipName(job));
   const [filter, setFilter] = useState<Resolution | "all">("all");
   const [selecting, setSelecting] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null);
+  const [saveProgress, setSaveProgress] = useState<string | null>(null);
 
   const running = activeExport?.state === "queued" || activeExport?.state === "exporting";
   const exportId = activeExport?.id;
   const complete = activeExport?.state === "complete";
+  const currentExport = complete && activeExport.reviewRevision === job.reviewRevision;
+  const jobSources = job.sources ?? [];
 
-  // Individual clips only exist once the export finishes.
   const loadFiles = useCallback(async () => {
     if (!exportId || !complete) {
       setFiles([]);
+      setSourceBundles([]);
       setZipUrl(null);
       return;
     }
     try {
       const body = await api.exportFiles(job.id, exportId);
       setFiles(body.files);
+      setSourceBundles(body.sourceBundles);
       setZipUrl(body.zipDownloadUrl);
     } catch {
       setFiles([]);
+      setSourceBundles([]);
     }
   }, [job.id, exportId, complete]);
 
@@ -79,21 +100,35 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
     void loadFiles();
   }, [loadFiles]);
 
-  // A new export replaces the file list, so any carried-over selection would
-  // point at clips that no longer exist.
   useEffect(() => {
     setPicked(new Set());
     setSelecting(false);
+    setZipName(initialZipName(job));
+    setDownloadError(null);
+    setDownloadNotice(null);
+    setSaveProgress(null);
   }, [exportId]);
 
   const shown = filter === "all" ? files : files.filter((file) => file.resolution === filter);
   const presentResolutions = [...new Set(files.map((file) => file.resolution))];
-
-  // Only files that exist on disk can be bundled; older exports have rows but
-  // no published MP4, and the server refuses a selection it cannot fulfil.
   const selectable = useMemo(() => shown.filter((file) => file.available), [shown]);
+  const availableFiles = useMemo(() => files.filter((file) => file.available), [files]);
   const chosen = useMemo(() => files.filter((file) => picked.has(file.id)), [files, picked]);
-  const allShownPicked = selectable.length > 0 && selectable.every((f) => picked.has(f.id));
+  const downloadFiles = selecting ? chosen : availableFiles;
+  const allShownPicked = selectable.length > 0 && selectable.every((file) => picked.has(file.id));
+
+  const fileGroups = useMemo(() => {
+    if (jobSources.length <= 1) {
+      return [{ id: jobSources[0]?.id ?? "source", name: null, files: shown }];
+    }
+    return jobSources
+      .map((source) => ({
+        id: source.id,
+        name: source.sourceName || source.fileName,
+        files: shown.filter((file) => file.sourceId === source.id),
+      }))
+      .filter((group) => group.files.length > 0);
+  }, [jobSources, shown]);
 
   const togglePick = (fileId: string) =>
     setPicked((previous) => {
@@ -115,19 +150,12 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
     setSelecting(false);
     setPicked(new Set());
     setDownloadError(null);
+    setDownloadNotice(null);
   };
 
-  /**
-   * Hand a URL to the browser's download manager without navigating.
-   *
-   * A plain `location.href` would leave the app if the server answered with an
-   * error instead of a file; an anchor with `download` never navigates, so the
-   * page and the current selection survive whatever comes back.
-   */
   const startDownload = (href: string, fileName?: string) => {
     const anchor = document.createElement("a");
     anchor.href = href;
-    // Empty means "use the name the server sent" for a same-origin download.
     anchor.download = fileName ?? "";
     anchor.rel = "noopener";
     document.body.appendChild(anchor);
@@ -135,20 +163,15 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
     anchor.remove();
   };
 
-  /**
-   * The file list can go stale — retention may have swept the clips, or a new
-   * export may have replaced them. The server refuses a selection it cannot
-   * fulfil in full rather than sending a quietly incomplete ZIP, so the same
-   * check is made here first to explain it properly.
-   */
-  const confirmStillAvailable = async (): Promise<boolean> => {
+  const confirmStillAvailable = async (requested: ExportFile[]): Promise<boolean> => {
     if (!exportId) return false;
     const fresh = await api.exportFiles(job.id, exportId);
     const byId = new Map(fresh.files.map((file) => [file.id, file]));
-    const missing = chosen.filter((file) => !byId.get(file.id)?.available);
+    const missing = requested.filter((file) => !byId.get(file.id)?.available);
     if (missing.length === 0) return true;
 
     setFiles(fresh.files);
+    setSourceBundles(fresh.sourceBundles);
     setPicked((previous) => {
       const next = new Set(previous);
       missing.forEach((file) => next.delete(file.id));
@@ -156,47 +179,122 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
     });
     setDownloadError(
       `${missing.length} selected clip${missing.length === 1 ? " is" : "s are"} no longer ` +
-        "available and have been deselected. Re-export the job to get them back.",
+        "available. Re-export the job to restore them.",
     );
     return false;
   };
 
-  const runDownload = async (action: () => Promise<void> | void) => {
+  const runDownload = async (requested: ExportFile[], action: () => Promise<void> | void) => {
+    setSaving(true);
+    setDownloadError(null);
+    setDownloadNotice(null);
+    try {
+      if (await confirmStillAvailable(requested)) await action();
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      setDownloadError(
+        caught instanceof Error ? caught.message : "The download could not be started.",
+      );
+    } finally {
+      setSaving(false);
+      setSaveProgress(null);
+    }
+  };
+
+  const downloadAsZip = () => {
+    if (!exportId || !zipName.trim()) return;
+    if (!selecting) {
+      startDownload(api.downloadUrl(job.id, exportId, zipName), zipName);
+      return;
+    }
+    void runDownload(downloadFiles, () => {
+      startDownload(
+        api.bundleUrl(job.id, exportId, encodeSelection(downloadFiles), zipName),
+        zipName,
+      );
+    });
+  };
+
+  const saveAsIndividualFiles = async () => {
+    setSaving(true);
+    setDownloadError(null);
+    setDownloadNotice(null);
+    try {
+      // The picker must be opened directly from the button gesture. Waiting on
+      // the availability request first would make Chromium reject it.
+      const directory = window.showDirectoryPicker
+        ? await window.showDirectoryPicker({ mode: "readwrite" })
+        : null;
+      if (!(await confirmStillAvailable(downloadFiles))) return;
+
+      if (!directory) {
+        setDownloadNotice(
+          "Folder selection is unavailable in this browser, so the files were sent to its normal download folder.",
+        );
+        for (const [index, file] of downloadFiles.entries()) {
+          startDownload(file.downloadUrl, file.fileName);
+          if (index < downloadFiles.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, SEQUENTIAL_DOWNLOAD_GAP_MS));
+          }
+        }
+        return;
+      }
+
+      for (const [index, file] of downloadFiles.entries()) {
+        setSaveProgress(`Saving ${index + 1} of ${downloadFiles.length}: ${file.fileName}`);
+        const response = await fetch(file.downloadUrl, { credentials: "same-origin" });
+        if (!response.ok) throw new Error(`Could not download ${file.fileName}.`);
+        const handle = await directory.getFileHandle(file.fileName, { create: true });
+        const writable = await handle.createWritable();
+        if (response.body) await response.body.pipeTo(writable);
+        else {
+          await writable.write(await response.blob());
+          await writable.close();
+        }
+      }
+      setDownloadNotice(
+        `${downloadFiles.length} MP4${downloadFiles.length === 1 ? "" : "s"} saved to the selected folder.`,
+      );
+    } catch (caught) {
+      if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+        setDownloadError(
+          caught instanceof Error ? caught.message : "The download could not be started.",
+        );
+      }
+    } finally {
+      setSaving(false);
+      setSaveProgress(null);
+    }
+  };
+
+  const downloadAllSourceBundles = async () => {
+    if (!exportId || sourceBundles.some((source) => !source.available)) return;
     setSaving(true);
     setDownloadError(null);
     try {
-      if (await confirmStillAvailable()) await action();
-    } catch (caught) {
-      setDownloadError(
-        caught instanceof ApiError ? caught.message : "The download could not be started.",
-      );
+      for (const [index, source] of sourceBundles.entries()) {
+        startDownload(
+          api.sourceBundleUrl(job.id, exportId, source.sourceId, source.fileName),
+          source.fileName,
+        );
+        if (index < sourceBundles.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, SEQUENTIAL_DOWNLOAD_GAP_MS));
+        }
+      }
     } finally {
       setSaving(false);
     }
   };
 
-  /** One ZIP containing exactly the chosen clips, streamed by the server. */
-  const downloadChosenAsZip = () =>
-    runDownload(() => {
-      if (!exportId) return;
-      startDownload(api.bundleUrl(job.id, exportId, encodeSelection(chosen)));
-    });
+  const downloadOneSourceBundle = (source: SourceBundle) => {
+    if (!exportId) return;
+    startDownload(
+      api.sourceBundleUrl(job.id, exportId, source.sourceId, source.fileName),
+      source.fileName,
+    );
+  };
 
-  /**
-   * Save each chosen clip as its own MP4. Browsers ask permission before the
-   * second file and throttle bursts, so the links are spaced out.
-   */
-  const downloadChosenAsFiles = () =>
-    runDownload(async () => {
-      for (const [index, file] of chosen.entries()) {
-        startDownload(file.downloadUrl, file.fileName);
-        if (index < chosen.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, SEQUENTIAL_DOWNLOAD_GAP_MS));
-        }
-      }
-    });
-
-  const toggle = (value: Resolution) =>
+  const toggleResolution = (value: Resolution) =>
     setResolutions((previous) =>
       previous.includes(value) ? previous.filter((item) => item !== value) : [...previous, value],
     );
@@ -218,8 +316,7 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
       <div>
         <h2 className="text-base font-semibold tracking-tight text-ink-900">Export</h2>
         <p className="mt-1 text-sm text-ink-500">
-          Frame-accurate H.264 clips. Download each one as an MP4, or take the whole
-          set as a ZIP with JSON and CSV manifests.
+          Create frame-accurate H.264 clips, then save individual MP4s or organized ZIP archives.
         </p>
       </div>
 
@@ -231,7 +328,7 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
               key={option.value}
               type="button"
               disabled={running || busy}
-              onClick={() => toggle(option.value)}
+              onClick={() => toggleResolution(option.value)}
               className={cn(
                 "rounded-xl border p-3 text-left transition-all duration-200 disabled:opacity-50",
                 on
@@ -263,11 +360,7 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
           disabled={running || busy}
           onChange={setIncludeAudio}
           label="Keep source audio"
-          description={
-            job.video && !job.video.hasAudio
-              ? "This source has no audio track, so clips export silently."
-              : "Both streams start at zero and stay synchronized."
-          }
+          description="Video and audio streams start at zero and remain synchronized."
         />
       </div>
 
@@ -287,14 +380,12 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
               </Button>
             )}
           </div>
-
           {running && (
             <>
               <Progress value={activeExport.progress.percent} className="mb-2" />
               <p className="text-xs text-ink-400">{activeExport.progress.message}</p>
             </>
           )}
-
           {activeExport.state === "failed" && (
             <div className="space-y-3">
               <p className="text-sm text-bad-600">{activeExport.error?.message}</p>
@@ -303,9 +394,7 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
                   variant="outline"
                   size="sm"
                   onClick={() =>
-                    void guard(() =>
-                      api.retryExport(job.id, activeExport.id, newIdempotencyKey()),
-                    )
+                    void guard(() => api.retryExport(job.id, activeExport.id, newIdempotencyKey()))
                   }
                 >
                   <IconRefresh style={{ height: 14, width: 14 }} />
@@ -314,214 +403,318 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
               )}
             </div>
           )}
-
         </div>
       )}
 
-      {/* ------------------------------------------------- Finished clips */}
-      {complete && files.length > 0 && (
+      {currentExport && (files.length > 0 || zipUrl) && (
         <div className="rounded-xl border border-line bg-canvas p-4">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <div>
+          {files.length > 0 && (
+            <>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-ink-900">
+                    {files.length} file{files.length === 1 ? "" : "s"} ready
+                  </h3>
+                  <p className="text-xs text-ink-400">
+                    {selecting
+                      ? "Tick any clips you want to download as a smaller set."
+                      : "Files are grouped by source and can also be downloaded directly."}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {presentResolutions.length > 1 && (
+                    <SegmentedControl
+                      size="sm"
+                      value={filter}
+                      onChange={setFilter}
+                      options={[
+                        { value: "all" as const, label: "All" },
+                        ...presentResolutions.map((value) => ({
+                          value,
+                          label: RESOLUTION_LABELS[value],
+                        })),
+                      ]}
+                    />
+                  )}
+                  {selecting ? (
+                    <Button variant="ghost" size="sm" onClick={leaveSelectMode}>
+                      <IconX style={{ height: 14, width: 14 }} />
+                      Done
+                    </Button>
+                  ) : (
+                    <Button variant="outline" size="sm" onClick={() => setSelecting(true)}>
+                      <IconCheck style={{ height: 14, width: 14 }} />
+                      Select clips
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {selecting && (
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-paper px-3 py-2">
+                  <Checkbox
+                    checked={allShownPicked}
+                    disabled={selectable.length === 0}
+                    onChange={toggleAllShown}
+                    label={
+                      <span className="text-xs font-medium text-ink-600">
+                        {allShownPicked ? "Clear all" : `Select all ${selectable.length}`}
+                        {filter !== "all" && " shown"}
+                      </span>
+                    }
+                  />
+                  <span className="text-xs tabular-nums text-ink-400">
+                    {chosen.length} selected
+                    {chosen.length > 0 && ` · ${formatBytes(selectionBytes(chosen))}`}
+                  </span>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                {fileGroups.map((group) => (
+                  <section key={group.id}>
+                    {group.name && (
+                      <div className="mb-1.5 flex items-center gap-2 rounded-lg bg-paper px-3 py-2">
+                        <IconLayers className="text-azure-700" style={{ height: 14, width: 14 }} />
+                        <h4 className="truncate text-xs font-semibold uppercase tracking-wider text-ink-600">
+                          {group.name}
+                        </h4>
+                        <span className="ml-auto text-xs text-ink-400">{group.files.length} files</span>
+                      </div>
+                    )}
+                    <ul className="divide-y divide-line">
+                      {group.files.map((file) => {
+                        const isPicked = picked.has(file.id);
+                        return (
+                          <li
+                            key={file.id}
+                            className={cn(
+                              "flex items-center gap-3 px-1 py-2.5 transition-colors",
+                              selecting && file.available && "cursor-pointer",
+                              isPicked && "bg-azure-50",
+                            )}
+                            onClick={
+                              selecting && file.available ? () => togglePick(file.id) : undefined
+                            }
+                          >
+                            {selecting ? (
+                              <span className="flex-none" onClick={(event) => event.stopPropagation()}>
+                                <Checkbox
+                                  checked={isPicked}
+                                  disabled={!file.available}
+                                  onChange={() => togglePick(file.id)}
+                                  label=""
+                                />
+                              </span>
+                            ) : (
+                              <span className="grid size-9 flex-none place-items-center rounded-lg border border-line bg-canvas-2 text-azure-700">
+                                <IconFilm style={{ height: 16, width: 16 }} />
+                              </span>
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-medium text-ink-900">
+                                {file.fileName}
+                              </p>
+                              <p className="text-xs text-ink-400">
+                                {file.width}x{file.height} · {formatDuration(file.durationUs)} ·{" "}
+                                {formatBytes(file.sizeBytes)}
+                              </p>
+                            </div>
+                            <Badge tone="neutral" className="hidden sm:inline-flex">
+                              {RESOLUTION_LABELS[file.resolution]}
+                            </Badge>
+                            {file.available ? (
+                              !selecting && (
+                                <ButtonLink
+                                  href={file.downloadUrl}
+                                  download={file.fileName}
+                                  variant="outline"
+                                  size="sm"
+                                  className="flex-none"
+                                >
+                                  <IconDownload style={{ height: 14, width: 14 }} />
+                                  MP4
+                                </ButtonLink>
+                              )
+                            ) : (
+                              <span className="flex-none text-xs text-ink-400">ZIP only</span>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </section>
+                ))}
+              </div>
+            </>
+          )}
+
+          {downloadError && <Alert tone="rose" className="mt-3" role="alert">{downloadError}</Alert>}
+          {downloadNotice && <Alert tone="emerald" className="mt-3" role="status">{downloadNotice}</Alert>}
+
+          <div className={cn("border-line pt-5", files.length > 0 && "mt-5 border-t")}>
+            <div className="mb-4">
               <h3 className="text-sm font-semibold text-ink-900">
-                {files.length} file{files.length === 1 ? "" : "s"} ready
+                {selecting ? `Download ${chosen.length} selected` : "Download all clips"}
               </h3>
-              <p className="text-xs text-ink-400">
-                {selecting
-                  ? "Tick the clips you want, then download them together."
-                  : "Download any clip directly as MP4 — no unzipping needed."}
+              <p className="mt-1 text-xs text-ink-400">
+                Choose individual MP4 files or one named ZIP archive.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {presentResolutions.length > 1 && (
-                <SegmentedControl
-                  size="sm"
-                  value={filter}
-                  onChange={setFilter}
-                  options={[
-                    { value: "all" as const, label: "All" },
-                    ...presentResolutions.map((r) => ({ value: r, label: RESOLUTION_LABELS[r] })),
-                  ]}
+
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div className="flex flex-col rounded-xl border border-line bg-paper p-4 shadow-soft">
+                <DownloadOptionHeading
+                  icon={<IconFolder style={{ height: 18, width: 18 }} />}
+                  title="Individual MP4 files"
+                  description="Pick a folder in Explorer and save every clip directly into it."
                 />
-              )}
-              {selecting ? (
-                <Button variant="ghost" size="sm" onClick={leaveSelectMode}>
-                  <IconX style={{ height: 14, width: 14 }} />
-                  Done
-                </Button>
-              ) : (
-                <Button variant="outline" size="sm" onClick={() => setSelecting(true)}>
-                  <IconCheck style={{ height: 14, width: 14 }} />
-                  Select
-                </Button>
-              )}
-            </div>
-          </div>
-
-          {selecting && (
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-canvas px-3 py-2">
-              <Checkbox
-                checked={allShownPicked}
-                disabled={selectable.length === 0}
-                onChange={toggleAllShown}
-                label={
-                  <span className="text-xs font-medium text-ink-600">
-                    {allShownPicked ? "Clear all" : `Select all ${selectable.length}`}
-                    {filter !== "all" && " shown"}
-                  </span>
-                }
-              />
-              <span className="text-xs tabular-nums text-ink-400">
-                {chosen.length} selected
-                {chosen.length > 0 && ` · ${formatBytes(selectionBytes(chosen))}`}
-              </span>
-            </div>
-          )}
-
-          <ul className="divide-y divide-line">
-            {shown.map((file) => {
-              const isPicked = picked.has(file.id);
-              return (
-                <li
-                  key={file.id}
-                  className={cn(
-                    "flex items-center gap-3 py-2.5 transition-colors",
-                    selecting && file.available && "cursor-pointer",
-                    isPicked && "bg-azure-50",
-                  )}
-                  onClick={
-                    selecting && file.available ? () => togglePick(file.id) : undefined
-                  }
+                <Button
+                  variant="outline"
+                  size="md"
+                  loading={saving}
+                  onClick={() => void saveAsIndividualFiles()}
+                  disabled={downloadFiles.length === 0 || saving}
+                  className="mt-4 w-full"
                 >
-                  {selecting ? (
-                    <span className="flex-none" onClick={(event) => event.stopPropagation()}>
-                      <Checkbox
-                        checked={isPicked}
-                        disabled={!file.available}
-                        onChange={() => togglePick(file.id)}
-                        label=""
-                      />
-                    </span>
-                  ) : (
-                    <span className="grid size-9 flex-none place-items-center rounded-lg border border-line bg-canvas-2 text-azure-700">
-                      <IconFilm style={{ height: 16, width: 16 }} />
-                    </span>
-                  )}
+                  <IconFolder style={{ height: 15, width: 15 }} />
+                  Choose folder & save {downloadFiles.length} MP4
+                  {downloadFiles.length === 1 ? "" : "s"}
+                </Button>
+                {saveProgress && <p className="mt-2 truncate text-xs text-azure-700" role="status">{saveProgress}</p>}
+              </div>
 
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-ink-900">{file.fileName}</p>
-                    <p className="text-xs text-ink-400">
-                      {file.width}×{file.height} · {formatDuration(file.durationUs)} ·{" "}
-                      {formatBytes(file.sizeBytes)}
-                    </p>
-                  </div>
+              <div className="flex flex-col rounded-xl border border-line bg-paper p-4 shadow-soft">
+                <DownloadOptionHeading
+                  icon={<IconArchive style={{ height: 18, width: 18 }} />}
+                  title="One ZIP archive"
+                  description="Includes the clips plus matching JSON and CSV manifests."
+                />
+                <label className="mt-4 block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-ink-400">
+                    ZIP file name
+                  </span>
+                  <Input
+                    value={zipName}
+                    maxLength={120}
+                    onChange={(event) => setZipName(event.target.value)}
+                    aria-label="ZIP file name"
+                    placeholder="scene-clips.zip"
+                  />
+                </label>
+                <Button
+                  variant="primary"
+                  size="md"
+                  onClick={downloadAsZip}
+                  disabled={
+                    !zipName.trim() ||
+                    (selecting && downloadFiles.length === 0) ||
+                    (!selecting && !zipUrl)
+                  }
+                  className="mt-3 w-full"
+                >
+                  <IconDownload style={{ height: 15, width: 15 }} />
+                  Download ZIP
+                  {downloadFiles.length > 0 && ` · ${formatBytes(selectionBytes(downloadFiles))}`}
+                </Button>
+              </div>
+            </div>
 
-                  <Badge tone="neutral" className="hidden sm:inline-flex">
-                    {RESOLUTION_LABELS[file.resolution]}
-                  </Badge>
-
-                  {file.available ? (
-                    !selecting && (
-                      <ButtonLink
-                        href={file.downloadUrl}
-                        download={file.fileName}
+            {!selecting && jobSources.length > 1 && sourceBundles.length > 0 && (
+              <div className="mt-4 rounded-xl border border-line bg-paper p-4 shadow-soft">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <DownloadOptionHeading
+                    icon={<IconLayers style={{ height: 18, width: 18 }} />}
+                    title="Separate ZIP for each source"
+                    description="Each archive is named after its source and contains only that video's clips."
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    loading={saving}
+                    onClick={() => void downloadAllSourceBundles()}
+                    disabled={saving || sourceBundles.some((source) => !source.available)}
+                  >
+                    <IconDownload style={{ height: 14, width: 14 }} />
+                    Download all source ZIPs
+                  </Button>
+                </div>
+                <ul className="mt-4 divide-y divide-line border-t border-line">
+                  {sourceBundles.map((source) => (
+                    <li key={source.sourceId} className="flex items-center gap-3 py-3">
+                      <span className="grid size-8 flex-none place-items-center rounded-lg bg-canvas text-azure-700">
+                        <IconArchive style={{ height: 15, width: 15 }} />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-ink-900">{source.fileName}</p>
+                        <p className="truncate text-xs text-ink-400">
+                          {source.sourceName || source.sourceFileName} · {source.fileCount} file
+                          {source.fileCount === 1 ? "" : "s"} · {formatBytes(source.sizeBytes)}
+                        </p>
+                      </div>
+                      <Button
                         variant="outline"
                         size="sm"
-                        className="flex-none"
+                        onClick={() => downloadOneSourceBundle(source)}
+                        disabled={!source.available}
                       >
-                        <IconDownload style={{ height: 14, width: 14 }} />
-                        MP4
-                      </ButtonLink>
-                    )
-                  ) : (
-                    <span
-                      className="flex-none text-xs text-ink-400"
-                      title="This export predates individual downloads. Re-export to get MP4s."
-                    >
-                      in ZIP only
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-
-          {selecting && downloadError && (
-            <Alert tone="rose" className="mt-3" role="alert">
-              {downloadError}
-            </Alert>
-          )}
-
-          {selecting && (
-            <div className="mt-3 flex flex-wrap gap-2 border-t border-line pt-3">
-              <Button
-                variant="primary"
-                size="sm"
-                loading={saving}
-                onClick={() => void downloadChosenAsZip()}
-                disabled={chosen.length === 0 || saving}
-              >
-                <IconDownload style={{ height: 14, width: 14 }} />
-                Download {chosen.length || ""} together
-                {chosen.length > 0 && ` (${formatBytes(selectionBytes(chosen))})`}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                loading={saving}
-                onClick={() => void downloadChosenAsFiles()}
-                disabled={chosen.length === 0 || saving}
-              >
-                Save as separate MP4s
-              </Button>
-            </div>
-          )}
-
-          {selecting && chosen.length > 0 && (
-            <p className="mt-2 text-xs text-ink-400">
-              “Together” gives you one ZIP of the {chosen.length} selected clip
-              {chosen.length === 1 ? "" : "s"} with matching manifests. “Separate MP4s” saves
-              each file on its own — your browser will ask permission to save several files.
-            </p>
-          )}
-
-          {!selecting && zipUrl && (
-            <div className="mt-3 border-t border-line pt-3">
-              <a
-                href={zipUrl}
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-500 no-underline transition-colors hover:text-ink-900"
-              >
-                <IconDownload style={{ height: 13, width: 13 }} />
-                Or download everything as one ZIP (includes JSON + CSV manifests)
-              </a>
-            </div>
-          )}
+                        <IconDownload style={{ height: 13, width: 13 }} />
+                        ZIP
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      <ShimmerButton
-        onClick={() =>
-          void guard(() =>
-            api.createExport(
-              job.id,
-              job.reviewRevision,
-              resolutions,
-              includeAudio,
-              newIdempotencyKey(),
-            ),
-          )
-        }
-        disabled={running || busy || resolutions.length === 0 || selectedCount === 0}
-        className="w-full"
-      >
-        {busy
-          ? "Starting…"
-          : `Export ${selectedCount} clip${selectedCount === 1 ? "" : "s"}`}
-      </ShimmerButton>
+      {!currentExport && (
+        <ShimmerButton
+          onClick={() =>
+            void guard(() =>
+              api.createExport(
+                job.id,
+                job.reviewRevision,
+                resolutions,
+                includeAudio,
+                newIdempotencyKey(),
+              ),
+            )
+          }
+          disabled={running || busy || resolutions.length === 0 || selectedCount === 0}
+          className="w-full"
+        >
+          {busy ? "Starting..." : `Export ${selectedCount} clip${selectedCount === 1 ? "" : "s"}`}
+        </ShimmerButton>
+      )}
 
       {selectedCount === 0 && (
         <p className="text-center text-xs text-ink-400">Select at least one clip to export.</p>
       )}
+    </div>
+  );
+}
+
+function DownloadOptionHeading({
+  icon,
+  title,
+  description,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="grid size-10 flex-none place-items-center rounded-xl bg-azure-50 text-azure-700">
+        {icon}
+      </span>
+      <div>
+        <h4 className="text-sm font-semibold text-ink-900">{title}</h4>
+        <p className="mt-1 text-xs leading-relaxed text-ink-400">{description}</p>
+      </div>
     </div>
   );
 }

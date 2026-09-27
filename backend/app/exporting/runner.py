@@ -21,9 +21,9 @@ from app.config import Settings, get_settings
 from app.db import session_scope
 from app.exporting import manifest as manifest_module
 from app.logging_setup import get_logger
-from app.media.clips import ClipRenderError, render_export_clip, sha256_file
-from app.media.probe import probe_media
-from app.models import CandidateShot, Export, ExportFile, Job, SelectedClip, Upload
+from app.media.clips import ClipRenderError, render_export_clip, sha256_file, target_dimensions
+from app.media.probe import MediaInfo, probe_media
+from app.models import CandidateShot, Export, ExportFile, Job, JobSource, SelectedClip, Upload
 from app.services import exports as export_service
 from app.services import storage
 from app.util.ids import new_id
@@ -39,6 +39,9 @@ class ExportCancelled(Exception):
 class _ClipPlan:
     serial: int
     candidate_id: str
+    source_id: str
+    source_file_name: str
+    source_name: str | None
     start_us: int
     end_us: int
     score: float
@@ -46,12 +49,22 @@ class _ClipPlan:
     reason: str
 
 
+@dataclass(slots=True)
+class _SourcePlan:
+    id: str
+    path: Path
+    file_name: str
+    sha256: str
+    source_label: dict[str, Any] | None
+    info: MediaInfo | None = None
+
+
 def run_export(
     export_id: str,
     *,
     should_cancel: Callable[[], bool] | None = None,
     heartbeat: Callable[[], None] | None = None,
-) -> None:
+) -> None:  # noqa: PLR0911, PLR0912, PLR0915
     settings = get_settings()
 
     def cancelled() -> bool:
@@ -77,26 +90,39 @@ def run_export(
         job = db.get(Job, export.job_id)
         if job is None or job.deleted_at is not None:
             return
-        upload = db.get(Upload, job.upload_id)
-        if upload is None:
+        source_rows = list(
+            db.execute(
+                select(JobSource).where(JobSource.job_id == job.id).order_by(JobSource.order_index)
+            ).scalars()
+        )
+        source_plans: dict[str, _SourcePlan] = {}
+        for source_row in source_rows:
+            upload = db.get(Upload, source_row.upload_id)
+            if upload is None:
+                continue
+            source_plans[source_row.id] = _SourcePlan(
+                id=source_row.id,
+                path=storage.resolve(upload.relative_source_path, settings),
+                file_name=upload.file_name,
+                sha256=source_row.source_sha256,
+                source_label=(
+                    {"text": source_row.source_name, "style": source_row.source_label_style}
+                    if source_row.source_name and source_row.source_label_style
+                    else None
+                ),
+            )
+        if not source_plans:
             export_service.fail(
                 db, export, job, code="source_missing",
-                message="The source video is no longer available.", retryable=False,
+                message="A source video is no longer available.", retryable=False,
             )
             return
 
         export_service.mark_running(db, export)
-        source = storage.resolve(upload.relative_source_path, settings)
         job_id = job.id
         resolutions = list(export.resolutions)
         include_audio = export.include_audio
         review_revision = export.review_revision
-        source_file_name = upload.file_name
-        source_label = (
-            {"text": job.source_name, "style": job.source_label_style}
-            if job.source_name and job.source_label_style
-            else None
-        )
 
         if job.review_revision != review_revision:
             export_service.fail(
@@ -124,7 +150,8 @@ def run_export(
 
     attempt_id = new_id()
     try:
-        info = probe_media(source, settings)
+        for source_plan in source_plans.values():
+            source_plan.info = probe_media(source_plan.path, settings)
         _require_space(plans, resolutions, settings)
 
         with storage.attempt_directory(
@@ -132,34 +159,29 @@ def run_export(
         ) as workspace:
             clip_entries = _encode_clips(
                 export_id=export_id,
-                source=source,
-                info=info,
+                sources=source_plans,
                 plans=plans,
                 resolutions=resolutions,
                 include_audio=include_audio,
-                source_label=source_label,
                 workspace=workspace,
                 settings=settings,
                 cancelled=cancelled,
                 beat=beat,
             )
 
+            source_manifest = _source_manifest(job_id, source_plans)
             manifest = manifest_module.build_manifest(
                 job_id=job_id,
                 export_id=export_id,
-                created_at=dt.datetime.now(dt.timezone.utc),
-                source={
-                    "fileName": source_file_name,
-                    "sha256": info_sha(job_id),
-                    "durationUs": info.duration_us,
-                    "width": info.display_width,
-                    "height": info.display_height,
-                    "averageFrameRate": info.average_frame_rate,
-                    "hasAudio": info.has_audio,
-                },
+                created_at=dt.datetime.now(dt.UTC),
+                source=source_manifest,
                 resolutions=resolutions,
                 include_audio=include_audio,
-                source_label=source_label,
+                source_label=(
+                    next(iter(source_plans.values())).source_label
+                    if len(source_plans) == 1
+                    else None
+                ),
                 clips=clip_entries,
             )
             manifest_module.write_json(manifest, workspace / "manifest.json")
@@ -239,10 +261,36 @@ def run_export(
 # --- helpers ---------------------------------------------------------------
 
 
-def info_sha(job_id: str) -> str:
-    with session_scope() as db:
-        job = db.get(Job, job_id)
-        return job.source_sha256 if job else ""
+def _source_manifest(job_id: str, sources: dict[str, _SourcePlan]) -> dict[str, Any]:
+    entries = []
+    for source in sources.values():
+        assert source.info is not None
+        entries.append(
+            {
+                "id": source.id,
+                "fileName": source.file_name,
+                "sha256": source.sha256,
+                "durationUs": source.info.duration_us,
+                "width": source.info.display_width,
+                "height": source.info.display_height,
+                "averageFrameRate": source.info.average_frame_rate,
+                "hasAudio": source.info.has_audio,
+                "sourceLabel": source.source_label,
+            }
+        )
+    if len(entries) == 1:
+        return entries[0]
+    return {
+        "fileName": f"{len(entries)} source videos",
+        "sha256": "",
+        "durationUs": sum(int(entry["durationUs"]) for entry in entries),
+        "width": max(int(entry["width"]) for entry in entries),
+        "height": max(int(entry["height"]) for entry in entries),
+        "averageFrameRate": "multiple",
+        "hasAudio": any(bool(entry["hasAudio"]) for entry in entries),
+        "jobId": job_id,
+        "sources": entries,
+    }
 
 
 def _build_plans(db, job_id: str) -> list[_ClipPlan]:  # noqa: ANN001
@@ -263,6 +311,9 @@ def _build_plans(db, job_id: str) -> list[_ClipPlan]:  # noqa: ANN001
             _ClipPlan(
                 serial=serial,
                 candidate_id=clip.candidate_id,
+                source_id=candidate.source_id,
+                source_file_name=candidate.source_file_name,
+                source_name=candidate.source_name,
                 start_us=clip.start_us,
                 end_us=clip.end_us,
                 score=round(candidate.score, 4),
@@ -284,12 +335,10 @@ def _require_space(plans: list[_ClipPlan], resolutions: list[str], settings: Set
 def _encode_clips(
     *,
     export_id: str,
-    source: Path,
-    info,  # noqa: ANN001
+    sources: dict[str, _SourcePlan],
     plans: list[_ClipPlan],
     resolutions: list[str],
     include_audio: bool,
-    source_label: dict[str, Any] | None,
     workspace: Path,
     settings: Settings,
     cancelled: Callable[[], bool],
@@ -306,6 +355,9 @@ def _encode_clips(
         if cancelled():
             raise ExportCancelled()
         files: list[dict[str, Any]] = []
+        source_plan = sources.get(plan.source_id)
+        if source_plan is None or source_plan.info is None:
+            raise FileNotFoundError(plan.source_id)
 
         for resolution in resolutions:
             if cancelled():
@@ -317,9 +369,7 @@ def _encode_clips(
             destination = workspace / folder / name
             destination.parent.mkdir(parents=True, exist_ok=True)
 
-            from app.media.clips import target_dimensions
-
-            dimensions = target_dimensions(info, resolution)
+            dimensions = target_dimensions(source_plan.info, resolution)
             reuse = encoded_by_dimensions.get(dimensions)
             if reuse is not None and reuse.exists():
                 destination.write_bytes(reuse.read_bytes())
@@ -328,14 +378,14 @@ def _encode_clips(
                 digest = sha256_file(destination)
             else:
                 rendered = render_export_clip(
-                    source,
+                    source_plan.path,
                     destination,
-                    info=info,
+                    info=source_plan.info,
                     start_us=plan.start_us,
                     end_us=plan.end_us,
                     resolution=resolution,
                     include_audio=include_audio,
-                    source_label=source_label,
+                    source_label=source_plan.source_label,
                     settings=settings,
                     should_cancel=cancelled,
                 )
@@ -371,6 +421,9 @@ def _encode_clips(
             {
                 "serial": plan.serial,
                 "candidateId": plan.candidate_id,
+                "sourceId": plan.source_id,
+                "sourceFileName": plan.source_file_name,
+                "sourceName": plan.source_name,
                 "sourceStartUs": plan.start_us,
                 "sourceEndUs": plan.end_us,
                 "durationUs": plan.end_us - plan.start_us,

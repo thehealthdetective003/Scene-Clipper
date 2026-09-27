@@ -86,9 +86,6 @@ class TestChunkTransfer:
     @pytest.fixture
     def upload_without_csrf(self, client):
         """Create an upload with CSRF, then drop the header from the client."""
-        client.post(
-            "/api/v1/auth/login", json={"username": "admin", "password": _password()}
-        )
         client.headers["X-CSRF-Token"] = client.get("/api/v1/session").json()["csrfToken"]
         upload_id = create(client, size=30).json()["id"]
         del client.headers["X-CSRF-Token"]
@@ -309,9 +306,3 @@ class TestDeletion:
 
     def test_unknown_upload_is_not_found(self, auth_client):
         assert auth_client.get(f"{UPLOADS}/missing-id").status_code == 404
-
-
-def _password() -> str:
-    from tests.conftest import TEST_PASSWORD
-
-    return TEST_PASSWORD

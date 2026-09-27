@@ -4,9 +4,16 @@ import { motion } from "motion/react";
 
 import { MAX_CLIP_SECONDS, MIN_CLIP_SECONDS } from "../lib/clip";
 import { ApiError, api, newIdempotencyKey } from "../api/client";
-import type { Upload } from "../api/types";
+import type { JobSourceInput, Upload } from "../api/types";
 import { Button, ShimmerButton } from "../components/ui/Button";
-import { IconCheck, IconFilm, IconSparkle, IconUpload } from "../components/ui/Icons";
+import {
+  IconDownload,
+  IconFilm,
+  IconLink,
+  IconSparkle,
+  IconUpload,
+  IconX,
+} from "../components/ui/Icons";
 import {
   Alert,
   Field,
@@ -18,7 +25,7 @@ import {
   Textarea,
 } from "../components/ui/Primitives";
 import { GlowBorder } from "../components/ui/Spotlight";
-import { formatBytes, formatEta, formatRate } from "../lib/format";
+import { formatBytes } from "../lib/format";
 import {
   ResumableUpload,
   UploadCancelled,
@@ -28,296 +35,329 @@ import {
 
 const MAX_PROMPT_CHARS = 2000;
 const MAX_SOURCE_NAME_CHARS = 48;
+const MAX_SOURCES = 12;
 const ACCEPTED = ".mp4,.mov,.mkv,.webm,video/*";
-const CONTAINERS = ["MP4", "MOV", "MKV", "WebM"];
+type SourceMode = "file" | "url";
 
-type Phase = "choose" | "uploading" | "verifying" | "configure" | "starting";
+interface ReadySource {
+  key: string;
+  upload: Upload;
+  sourceName: string;
+  contentPrompt: string;
+}
+
+interface Transfer {
+  key: string;
+  label: string;
+  kind: SourceMode;
+  upload: Upload | null;
+  progress: UploadProgress | null;
+}
 
 export function NewJobPage() {
   const navigate = useNavigate();
-  const [phase, setPhase] = useState<Phase>("choose");
-  const [file, setFile] = useState<File | null>(null);
-  const [upload, setUpload] = useState<Upload | null>(null);
-  const [progress, setProgress] = useState<UploadProgress | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [sourceMode, setSourceMode] = useState<SourceMode>("file");
+  const [sources, setSources] = useState<ReadySource[]>([]);
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
+  const [videoUrls, setVideoUrls] = useState("");
   const [dragging, setDragging] = useState(false);
-
+  const [error, setError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [rankingEnabled, setRankingEnabled] = useState(false);
+  const [useGemini, setUseGemini] = useState(false);
   const [targetClipCount, setTargetClipCount] = useState(20);
-  const [contentPrompt, setContentPrompt] = useState("");
-  const [sourceName, setSourceName] = useState("");
-  const [useGemini, setUseGemini] = useState(true);
 
-  const uploaderRef = useRef<ResumableUpload | null>(null);
+  const uploaders = useRef(new Map<string, ResumableUpload>());
+  const remoteUploads = useRef(new Map<string, string>());
+  const cancelled = useRef(new Set<string>());
 
-  const beginUpload = async (chosen: File) => {
-    setFile(chosen);
-    setError(null);
-    setPhase("uploading");
+  const updateTransfer = (key: string, change: Partial<Transfer>) =>
+    setTransfers((current) =>
+      current.map((transfer) => (transfer.key === key ? { ...transfer, ...change } : transfer)),
+    );
 
-    const uploader = new ResumableUpload(chosen, {
-      onProgress: setProgress,
-      onStateChange: setUpload,
+  const finishTransfer = (key: string) => {
+    uploaders.current.delete(key);
+    remoteUploads.current.delete(key);
+    setTransfers((current) => current.filter((transfer) => transfer.key !== key));
+  };
+
+  const addReadySource = (key: string, upload: Upload) => {
+    if (cancelled.current.has(key)) return;
+    setSources((current) => [
+      ...current,
+      { key, upload, sourceName: "", contentPrompt: "" },
+    ]);
+  };
+
+  const addFile = async (file: File) => {
+    const key = newIdempotencyKey();
+    setTransfers((current) => [
+      ...current,
+      { key, label: file.name, kind: "file", upload: null, progress: null },
+    ]);
+    const uploader = new ResumableUpload(file, {
+      onProgress: (progress) => updateTransfer(key, { progress }),
+      onStateChange: (upload) => updateTransfer(key, { upload }),
     });
-    uploaderRef.current = uploader;
+    uploaders.current.set(key, uploader);
 
     try {
       const completed = await uploader.start();
-      setPhase("verifying");
-      const verified = await waitForVerification(completed.id, setUpload);
+      const verified = await waitForVerification(completed.id, (upload) =>
+        updateTransfer(key, { upload }),
+      );
       if (verified.state === "failed") {
-        setError(verified.error?.message ?? "The file could not be verified.");
-        setPhase("choose");
-        return;
+        throw new Error(verified.error?.message ?? "The file could not be verified.");
       }
-      setUpload(verified);
-      setPhase("configure");
+      addReadySource(key, verified);
     } catch (caught) {
-      if (caught instanceof UploadCancelled) {
-        setPhase("choose");
-        return;
+      if (!(caught instanceof UploadCancelled) && !cancelled.current.has(key)) {
+        setError(caught instanceof ApiError ? caught.message : (caught as Error).message);
       }
-      setError(caught instanceof ApiError ? caught.message : "The upload failed.");
-      setPhase("choose");
+    } finally {
+      finishTransfer(key);
     }
   };
 
-  const startJob = async () => {
-    if (!upload) return;
-    setPhase("starting");
+  const addFiles = (files: FileList | File[]) => {
     setError(null);
+    const room = Math.max(0, MAX_SOURCES - sources.length - transfers.length);
+    const chosen = Array.from(files).slice(0, room);
+    if (chosen.length < files.length) setError(`A job can contain up to ${MAX_SOURCES} videos.`);
+    chosen.forEach((file) => void addFile(file));
+  };
+
+  const addUrl = async (url: string) => {
+    const key = newIdempotencyKey();
+    setTransfers((current) => [
+      ...current,
+      { key, label: url, kind: "url", upload: null, progress: null },
+    ]);
     try {
-      const job = await api.createJob(
-        upload.id,
+      const created = await api.createUrlUpload(url, newIdempotencyKey());
+      remoteUploads.current.set(key, created.id);
+      updateTransfer(key, { upload: created });
+      if (cancelled.current.has(key)) {
+        await api.deleteUpload(created.id).catch(() => undefined);
+        return;
+      }
+      const verified = await waitForVerification(created.id, (upload) =>
+        updateTransfer(key, { upload }),
+      );
+      if (verified.state === "failed") {
+        throw new Error(verified.error?.message ?? "The video could not be downloaded.");
+      }
+      addReadySource(key, verified);
+    } catch (caught) {
+      if (!cancelled.current.has(key)) {
+        setError(caught instanceof ApiError ? caught.message : (caught as Error).message);
+      }
+    } finally {
+      finishTransfer(key);
+    }
+  };
+
+  const addLinks = () => {
+    const links = videoUrls
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (!links.length) return;
+    setError(null);
+    const room = Math.max(0, MAX_SOURCES - sources.length - transfers.length);
+    const chosen = links.slice(0, room);
+    if (chosen.length < links.length) setError(`A job can contain up to ${MAX_SOURCES} videos.`);
+    setVideoUrls("");
+    chosen.forEach((url) => void addUrl(url));
+  };
+
+  const cancelTransfer = async (transfer: Transfer) => {
+    cancelled.current.add(transfer.key);
+    uploaders.current.get(transfer.key)?.cancel();
+    const uploadId = transfer.upload?.id ?? remoteUploads.current.get(transfer.key);
+    finishTransfer(transfer.key);
+    if (uploadId) await api.deleteUpload(uploadId).catch(() => undefined);
+  };
+
+  const removeSource = async (source: ReadySource) => {
+    setSources((current) => current.filter((item) => item.key !== source.key));
+    await api.deleteUpload(source.upload.id).catch(() => undefined);
+  };
+
+  const updateSource = (key: string, change: Partial<ReadySource>) =>
+    setSources((current) =>
+      current.map((source) => (source.key === key ? { ...source, ...change } : source)),
+    );
+
+  const startJob = async () => {
+    if (!sources.length || transfers.length) return;
+    setStarting(true);
+    setError(null);
+    const inputs: JobSourceInput[] = sources.map((source) => ({
+      uploadId: source.upload.id,
+      sourceName: source.sourceName.trim() || null,
+      contentPrompt: source.contentPrompt.trim() || null,
+    }));
+    try {
+      const job = await api.createMultiSourceJob(
+        inputs,
         targetClipCount,
-        contentPrompt.trim() || null,
-        sourceName.trim() || null,
-        useGemini,
+        rankingEnabled,
+        rankingEnabled && useGemini,
         newIdempotencyKey(),
       );
       navigate(`/jobs/${job.id}`);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "The job could not be created.");
-      setPhase("configure");
+      setStarting(false);
     }
   };
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="mx-auto max-w-4xl space-y-6">
       <Rise>
-        <GlowBorder active={phase === "choose"}>
-          <div className="relative overflow-hidden rounded-[calc(var(--radius-panel)-1px)] bg-gradient-to-br from-navy-50 via-white to-azure-50 p-6 sm:p-8">
-            <div
-              aria-hidden
-              className="pointer-events-none absolute -right-20 -top-24 size-72 rounded-full bg-azure-300/25 blur-3xl"
-            />
+        <GlowBorder active={!starting}>
+          <div className="relative overflow-hidden rounded-[calc(var(--radius-panel)-1px)] bg-gradient-to-br from-navy-50 via-paper to-azure-50 p-6 sm:p-8">
+            <div aria-hidden className="pointer-events-none absolute -right-20 -top-24 size-72 rounded-full bg-azure-300/25 blur-3xl" />
             <div className="relative">
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-azure-100 bg-white px-3 py-1 text-xs font-semibold text-azure-700 shadow-soft">
-                <IconSparkle style={{ height: 13, width: 13 }} />
-                Automatic shot detection
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-azure-100 bg-paper px-3 py-1 text-xs font-semibold text-azure-700 shadow-soft">
+                <IconSparkle style={{ height: 13, width: 13 }} /> Multi-source scene detection
               </span>
-              <h1 className="mt-4 max-w-md text-2xl font-semibold leading-tight tracking-tight text-ink-900 sm:text-[28px]">
-                Make short clips from one long video, automatically
+              <h1 className="mt-4 max-w-xl text-2xl font-semibold leading-tight tracking-tight text-ink-900 sm:text-[28px]">
+                Build one clip collection from several videos
               </h1>
-              <p className="mt-2.5 max-w-lg text-sm leading-relaxed text-ink-500">
-                Every clip stays inside a single continuous shot — never crossing a cut, fade, or
-                dissolve — and lands between {MIN_CLIP_SECONDS} and {MAX_CLIP_SECONDS} seconds.
+              <p className="mt-2.5 max-w-2xl text-sm leading-relaxed text-ink-500">
+                Mix uploaded files and public links. Sources are analysed concurrently, while every
+                {" "}source keeps its own label and instruction. Clips stay between {MIN_CLIP_SECONDS}
+                {" "}and {MAX_CLIP_SECONDS} seconds without crossing a transition.
               </p>
             </div>
           </div>
         </GlowBorder>
       </Rise>
 
-      {error && (
-        <Alert tone="rose" role="alert">
-          {error}
-        </Alert>
-      )}
+      {error && <Alert tone="rose" role="alert">{error}</Alert>}
 
-      {phase === "choose" && (
-        <Rise delay={0.08}>
-          <label
-            onDragOver={(event) => {
-              event.preventDefault();
-              setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(event) => {
-              event.preventDefault();
-              setDragging(false);
-              const dropped = event.dataTransfer.files?.[0];
-              if (dropped) void beginUpload(dropped);
-            }}
-            className={`group flex cursor-pointer flex-col items-center justify-center rounded-panel border-2 border-dashed px-6 py-16 text-center transition-all duration-300 ${
-              dragging
-                ? "border-azure-500 bg-azure-50 shadow-[0_0_0_6px_rgb(0_163_250_/_0.10)]"
-                : "border-line-strong bg-paper hover:border-azure-300 hover:bg-azure-50/40"
-            }`}
-          >
-            <input
-              type="file"
-              accept={ACCEPTED}
-              hidden
-              onChange={(event) => {
-                const chosen = event.target.files?.[0];
-                if (chosen) void beginUpload(chosen);
-              }}
-            />
-            <motion.span
-              animate={dragging ? { y: -6, scale: 1.06 } : { y: 0, scale: 1 }}
-              transition={{ type: "spring", stiffness: 320, damping: 22 }}
-              className="mb-5 grid size-16 place-items-center rounded-2xl bg-gradient-to-br from-navy-900 to-azure-600 text-white shadow-navy"
-            >
-              <IconUpload style={{ height: 24, width: 24 }} />
-            </motion.span>
-            <p className="text-lg font-semibold text-ink-900">Drop one video here</p>
-            <p className="mt-1 text-sm text-ink-500">or click to browse — one video per job</p>
-
-            <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
-              {CONTAINERS.map((format) => (
-                <span
-                  key={format}
-                  className="rounded-lg border border-line bg-canvas px-2.5 py-1 text-xs font-medium text-ink-500"
-                >
-                  {format}
-                </span>
-              ))}
-            </div>
-          </label>
-        </Rise>
-      )}
-
-      {(phase === "uploading" || phase === "verifying") && (
+      {sources.length > 0 && (
         <Rise>
-          <Panel>
-            <div className="mb-4 flex items-center gap-3">
-              <span className="grid size-11 flex-none place-items-center rounded-xl bg-gradient-to-br from-navy-900 to-azure-600 text-white shadow-navy">
-                <IconFilm style={{ height: 19, width: 19 }} />
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold text-ink-900">{file?.name}</p>
-                <p className="text-xs text-ink-400">
-                  {phase === "verifying"
-                    ? "Checking the file hash and probing the media…"
-                    : `${formatBytes(progress?.uploadedBytes ?? 0)} of ${formatBytes(file?.size ?? 0)}`}
-                </p>
-              </div>
-              {phase === "uploading" && (
-                <span className="font-display text-lg font-semibold tabular-nums text-azure-700">
-                  {Math.round(progress?.percent ?? 0)}%
-                </span>
-              )}
+          <Panel className="space-y-4">
+            <div>
+              <h2 className="text-base font-semibold text-ink-900">
+                {sources.length} source{sources.length === 1 ? "" : "s"} ready
+              </h2>
+              <p className="mt-1 text-xs text-ink-400">
+                Labels and instructions apply only to the source where you enter them.
+              </p>
             </div>
-
-            <Progress
-              value={progress?.percent ?? 0}
-              indeterminate={phase === "verifying"}
-              className="mb-3"
-            />
-
-            {phase === "uploading" && (
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-xs text-ink-400">
-                  {formatRate(progress?.bytesPerSecond ?? 0)} ·{" "}
-                  {formatEta(progress?.secondsRemaining ?? null)}
-                </p>
-                <Button variant="danger" size="sm" onClick={() => uploaderRef.current?.cancel()}>
-                  Cancel upload
-                </Button>
+            {sources.map((source, index) => (
+              <div key={source.key} className="rounded-xl border border-line bg-canvas p-4">
+                <div className="mb-4 flex items-start gap-3">
+                  <span className="grid size-10 flex-none place-items-center rounded-xl bg-navy-900 text-white">
+                    <IconFilm style={{ height: 17, width: 17 }} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-ink-900">
+                      {index + 1}. {source.upload.fileName}
+                    </p>
+                    <p className="text-xs text-ink-400">
+                      {formatBytes(source.upload.declaredSizeBytes)} · {source.upload.sourceKind === "url" ? "link" : "file"}
+                    </p>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={() => void removeSource(source)}>
+                    <IconX style={{ height: 14, width: 14 }} /> Remove
+                  </Button>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label={`Source name for video ${index + 1}`} hint={`${source.sourceName.length} / ${MAX_SOURCE_NAME_CHARS}. Appears at the top left of this source's exported clips.`}>
+                    <Input maxLength={MAX_SOURCE_NAME_CHARS} value={source.sourceName} placeholder="e.g. Driver Sphere" onChange={(event) => updateSource(source.key, { sourceName: event.target.value })} />
+                  </Field>
+                  <Field label={`Instruction for video ${index + 1} (optional)`} hint="Used only if automatic ranking is enabled.">
+                    <Textarea rows={2} maxLength={MAX_PROMPT_CHARS} value={source.contentPrompt} placeholder="e.g. prioritize clear product shots without people" onChange={(event) => updateSource(source.key, { contentPrompt: event.target.value })} />
+                  </Field>
+                </div>
               </div>
-            )}
-
-            <p className="mt-3 text-xs leading-relaxed text-ink-400">
-              The transfer is resumable: if it is interrupted it continues from the last verified
-              byte rather than starting over.
-            </p>
+            ))}
           </Panel>
         </Rise>
       )}
 
-      {(phase === "configure" || phase === "starting") && upload && (
+      {transfers.length > 0 && (
         <Rise>
-          <Panel className="space-y-6">
-            <div className="flex items-center gap-3 rounded-xl border border-ok-100 bg-ok-50 px-4 py-3">
-              <span className="grid size-9 flex-none place-items-center rounded-lg bg-ok-500 text-white">
-                <IconCheck style={{ height: 16, width: 16 }} strokeWidth={3} />
-              </span>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-ink-900">{upload.fileName}</p>
-                <p className="text-xs text-ok-600">
-                  {formatBytes(upload.declaredSizeBytes)} · checksum verified
-                </p>
-              </div>
+          <Panel className="space-y-3">
+            <h2 className="text-base font-semibold text-ink-900">Preparing sources</h2>
+            {transfers.map((transfer) => {
+              const progress = transfer.kind === "file" ? transfer.progress?.percent ?? 0 : transfer.upload?.progressPercent ?? 0;
+              const indeterminate = transfer.kind === "url" && !transfer.upload?.declaredSizeBytes;
+              return (
+                <div key={transfer.key} className="rounded-xl border border-line bg-canvas p-3">
+                  <div className="mb-2 flex items-center gap-3">
+                    <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink-800">{transfer.label}</p>
+                    <span className="text-sm font-semibold tabular-nums text-azure-700">{Math.round(progress)}%</span>
+                    <Button variant="danger" size="sm" onClick={() => void cancelTransfer(transfer)}>Cancel</Button>
+                  </div>
+                  <Progress value={progress} indeterminate={indeterminate} />
+                </div>
+              );
+            })}
+          </Panel>
+        </Rise>
+      )}
+
+      {sources.length + transfers.length < MAX_SOURCES && !starting && (
+        <Rise delay={0.05}>
+          <Panel className="p-2 sm:p-2">
+            <div className="mb-2 grid grid-cols-2 gap-1 rounded-xl bg-canvas p-1" role="tablist">
+              {([["file", "Add video files", IconUpload], ["url", "Paste video links", IconLink]] as const).map(([mode, label, Icon]) => (
+                <button key={mode} type="button" role="tab" aria-selected={sourceMode === mode} onClick={() => setSourceMode(mode)} className={`inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-semibold transition ${sourceMode === mode ? "bg-paper text-azure-700 shadow-soft" : "text-ink-500 hover:text-ink-900"}`}>
+                  <Icon style={{ height: 16, width: 16 }} /> {label}
+                </button>
+              ))}
             </div>
+            {sourceMode === "file" ? (
+              <label
+                onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}
+                className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-10 text-center transition ${dragging ? "border-azure-500 bg-azure-50" : "border-line-strong bg-paper hover:border-azure-300"}`}
+              >
+                <input type="file" accept={ACCEPTED} multiple hidden onChange={(event) => event.target.files && addFiles(event.target.files)} />
+                <motion.span animate={dragging ? { y: -4, scale: 1.05 } : { y: 0, scale: 1 }} className="mb-4 grid size-14 place-items-center rounded-2xl bg-gradient-to-br from-navy-900 to-azure-600 text-white shadow-navy">
+                  <IconUpload style={{ height: 22, width: 22 }} />
+                </motion.span>
+                <p className="font-semibold text-ink-900">Drop one or several videos here</p>
+                <p className="mt-1 text-sm text-ink-500">or click to choose MP4, MOV, MKV, or WebM files</p>
+              </label>
+            ) : (
+              <form className="rounded-xl border border-line bg-paper p-5" onSubmit={(event) => { event.preventDefault(); addLinks(); }}>
+                <Field label="Video links" hint="One public video URL per line. They download concurrently.">
+                  <Textarea rows={4} required value={videoUrls} aria-label="Video links" placeholder={"https://www.youtube.com/watch?v=…\nhttps://vimeo.com/…"} onChange={(event) => setVideoUrls(event.target.value)} />
+                </Field>
+                <ShimmerButton type="submit" disabled={!videoUrls.trim()} className="mt-3 w-full">
+                  <IconDownload style={{ height: 16, width: 16 }} /> Add links
+                </ShimmerButton>
+              </form>
+            )}
+          </Panel>
+        </Rise>
+      )}
 
-            <Field
-              label="Target clip count"
-              hint="Between 1 and 100. If fewer usable shots exist the job still succeeds and reports the shortfall."
-            >
-              <div className="flex items-center gap-4">
-                <input
-                  type="range"
-                  min={1}
-                  max={100}
-                  value={targetClipCount}
-                  onChange={(event) => setTargetClipCount(Number(event.target.value))}
-                  className="flex-1"
-                />
-                <Input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={targetClipCount}
-                  onChange={(event) =>
-                    setTargetClipCount(Number.parseInt(event.target.value, 10) || 1)
-                  }
-                  className="w-20 text-center tabular-nums"
-                />
+      {sources.length > 0 && (
+        <Rise delay={0.08}>
+          <Panel className="space-y-5">
+            <Switch checked={rankingEnabled} disabled={starting} onChange={setRankingEnabled} label="Automatically rank and preselect clips" description="Turn this off for a blank manual review where you choose every clip yourself." />
+            {rankingEnabled && (
+              <div className="space-y-5 rounded-xl border border-line bg-canvas p-4">
+                <Field label="Target clip count" hint="How many top-ranked clips should be preselected.">
+                  <Input type="number" min={1} max={100} value={targetClipCount} onChange={(event) => setTargetClipCount(Math.max(1, Math.min(100, Number(event.target.value) || 1)))} />
+                </Field>
+                <Switch checked={useGemini} disabled={starting} onChange={setUseGemini} label="Use Gemini for ranking" description="Off uses local measurements only. On sends representative frames according to Settings." />
               </div>
-            </Field>
-
-            <Field
-              label="Source name (optional)"
-              hint={`${sourceName.length} / ${MAX_SOURCE_NAME_CHARS} characters. Shown in uppercase at the top left of review previews and exported clips. Leave blank for no label.`}
-            >
-              <Input
-                type="text"
-                maxLength={MAX_SOURCE_NAME_CHARS}
-                value={sourceName}
-                placeholder="e.g. Driver Sphere"
-                onChange={(event) => setSourceName(event.target.value)}
-              />
-            </Field>
-
-            <Field
-              label="Product (optional)"
-              hint={`${contentPrompt.length} / ${MAX_PROMPT_CHARS} characters. Name one product. Shots that clearly show it, with nobody in frame, are selected first — the rest stay available to pick by hand.`}
-            >
-              <Textarea
-                rows={3}
-                maxLength={MAX_PROMPT_CHARS}
-                value={contentPrompt}
-                placeholder="e.g. the matte black espresso machine with the brass handle"
-                onChange={(event) => setContentPrompt(event.target.value)}
-              />
-            </Field>
-
-            <div className="rounded-xl border border-line bg-canvas p-4">
-              <Switch
-                checked={useGemini}
-                onChange={setUseGemini}
-                label="Use Gemini to rank clips"
-                description="Representative still frames — and rarely a short low-resolution excerpt — are sent. Your full source video is never sent."
-              />
-            </div>
-
-            <ShimmerButton
-              onClick={() => void startJob()}
-              disabled={phase === "starting" || targetClipCount < 1 || targetClipCount > 100}
-              className="w-full"
-            >
-              <IconSparkle style={{ height: 16, width: 16 }} />
-              {phase === "starting" ? "Starting…" : "Start analysis"}
+            )}
+            <ShimmerButton onClick={() => void startJob()} disabled={starting || transfers.length > 0} className="w-full">
+              {starting ? "Starting…" : `Analyse ${sources.length} source${sources.length === 1 ? "" : "s"}`}
             </ShimmerButton>
+            {transfers.length > 0 && <p className="text-center text-xs text-ink-400">Wait for every source to finish preparing before starting.</p>}
           </Panel>
         </Rise>
       )}

@@ -103,6 +103,12 @@ export function CandidateCard({
       </div>
 
       {/* Header */}
+      <p
+        className="mb-2 truncate text-xs font-medium text-azure-700"
+        title={candidate.sourceFileName}
+      >
+        {candidate.sourceName || candidate.sourceFileName}
+      </p>
       <div className="mb-3 flex items-start justify-between gap-2">
         <Checkbox
           checked={selected}
@@ -111,9 +117,11 @@ export function CandidateCard({
           label={
             <span className="text-sm font-semibold text-ink-900">
               Shot {candidate.shotNumber}
-              <span className="ml-1.5 text-xs font-normal text-ink-400">
-                rank #{candidate.rank}
-              </span>
+              {candidate.score > 0 && (
+                <span className="ml-1.5 text-xs font-normal text-ink-400">
+                  rank #{candidate.rank}
+                </span>
+              )}
             </span>
           }
         />
@@ -125,7 +133,7 @@ export function CandidateCard({
               onClick={() => onMove(candidate.id, -1)}
               disabled={busy}
               aria-label="Move earlier"
-              className="grid size-7 place-items-center rounded-lg border border-line bg-white text-ink-500 transition-colors hover:border-azure-300 hover:text-navy-800 disabled:opacity-40"
+              className="grid size-7 place-items-center rounded-lg border border-line bg-paper text-ink-500 transition-colors hover:border-azure-300 hover:text-ink-900 disabled:opacity-40"
             >
               <IconArrowUp style={{ height: 13, width: 13 }} />
             </button>
@@ -134,7 +142,7 @@ export function CandidateCard({
               onClick={() => onMove(candidate.id, 1)}
               disabled={busy}
               aria-label="Move later"
-              className="grid size-7 place-items-center rounded-lg border border-line bg-white text-ink-500 transition-colors hover:border-azure-300 hover:text-navy-800 disabled:opacity-40"
+              className="grid size-7 place-items-center rounded-lg border border-line bg-paper text-ink-500 transition-colors hover:border-azure-300 hover:text-ink-900 disabled:opacity-40"
             >
               <IconArrowDown style={{ height: 13, width: 13 }} />
             </button>
@@ -150,21 +158,25 @@ export function CandidateCard({
             {formatTimecode(candidate.sourceStartUs)}
           </dd>
         </div>
-        <div>
-          <dt className="text-ink-400">Score</dt>
-          <dd className="mt-0.5 font-medium tabular-nums text-ink-800">
-            {candidate.score.toFixed(1)}
-            <span className="ml-1 font-normal text-ink-400">
-              · {candidate.confidence.toFixed(2)}
-            </span>
-          </dd>
-        </div>
+        {candidate.score > 0 && (
+          <div>
+            <dt className="text-ink-400">Score</dt>
+            <dd className="mt-0.5 font-medium tabular-nums text-ink-800">
+              {candidate.score.toFixed(1)}
+              <span className="ml-1 font-normal text-ink-400">
+                · {candidate.confidence.toFixed(2)}
+              </span>
+            </dd>
+          </div>
+        )}
       </dl>
 
       <div className="mb-3 flex flex-wrap gap-1.5">
-        <Badge tone={candidate.scoringSource === "local-fallback" ? "neutral" : "azure"}>
-          {scoringSourceLabel(candidate.scoringSource)}
-        </Badge>
+        {candidate.score > 0 && (
+          <Badge tone={candidate.scoringSource === "local-fallback" ? "neutral" : "azure"}>
+            {scoringSourceLabel(candidate.scoringSource)}
+          </Badge>
+        )}
         {candidate.cacheStatus !== "none" && (
           <Badge tone="neutral">{cacheStatusLabel(candidate.cacheStatus)}</Badge>
         )}
@@ -203,7 +215,7 @@ export function CandidateCard({
         </p>
       )}
 
-      {!candidate.promptRelevanceEvaluated && (
+      {candidate.score > 0 && !candidate.promptRelevanceEvaluated && (
         <p className="text-xs text-ink-400">Prompt relevance was not evaluated for this clip.</p>
       )}
 

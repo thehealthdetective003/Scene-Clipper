@@ -59,6 +59,26 @@ export const IconX = (p: Props) => (
   </Svg>
 );
 
+export const IconSun = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="4" />
+    <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42" />
+  </Svg>
+);
+
+export const IconMoon = (p: Props) => (
+  <Svg {...p}>
+    <path d="M20.5 14.1A8.5 8.5 0 0 1 9.9 3.5 8.5 8.5 0 1 0 20.5 14.1z" />
+  </Svg>
+);
+
+export const IconMonitor = (p: Props) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="13" rx="2" />
+    <path d="M8 21h8M12 17v4" />
+  </Svg>
+);
+
 /* --- Media ---------------------------------------------------------------- */
 
 export const IconPlay = (p: Props) => (
@@ -76,6 +96,25 @@ export const IconUpload = (p: Props) => (
 export const IconDownload = (p: Props) => (
   <Svg {...p}>
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+  </Svg>
+);
+
+export const IconFolder = (p: Props) => (
+  <Svg {...p}>
+    <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H9l2 2h7.5A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-10z" />
+  </Svg>
+);
+
+export const IconArchive = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 8h16v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8zM3 3h18v5H3zM10 12h4" />
+  </Svg>
+);
+
+export const IconLink = (p: Props) => (
+  <Svg {...p}>
+    <path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15" />
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.14-1.14" />
   </Svg>
 );
 

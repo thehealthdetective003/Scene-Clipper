@@ -8,7 +8,9 @@ repeating completed work, and a resumed run produces no duplicate candidates.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,7 +30,7 @@ from app.media.frames import extract_jpeg
 from app.media.probe import MediaInfo, UnsupportedMediaError, probe_media
 from app.media.runner import MediaToolCancelled, MediaToolError
 from app.media.timebase import Interval
-from app.models import CandidateShot, DetectedShot, Job, Upload
+from app.models import CandidateShot, DetectedShot, Job, JobSource, Upload
 from app.providers.gemini import get_provider
 from app.services import events, review, storage
 from app.services import jobs as job_service
@@ -44,6 +46,7 @@ logger = get_logger("app.analysis.pipeline")
 #: Previews are generated eagerly for this many top-ranked candidates; the rest
 #: are rendered on demand by the preview route.
 EAGER_PREVIEW_LIMIT = 60
+MULTI_SOURCE_WORKERS = 3
 
 
 class AnalysisCancelled(Exception):
@@ -53,9 +56,13 @@ class AnalysisCancelled(Exception):
 @dataclass(slots=True)
 class _Context:
     job_id: str
+    source_id: str
+    source_order: int
+    source_file_name: str
     settings: Settings
     source: Path
     source_label: dict | None = None
+    content_prompt: str | None = None
     info: MediaInfo | None = None
 
 
@@ -64,7 +71,7 @@ def run_analysis(
     *,
     should_cancel: Callable[[], bool] | None = None,
     heartbeat: Callable[[], None] | None = None,
-) -> None:
+) -> None:  # noqa: PLR0912, PLR0915
     """Run (or resume) the analysis pipeline for one job."""
     settings = get_settings()
 
@@ -87,26 +94,54 @@ def run_analysis(
         if job.state in ("review-ready", "complete", "exporting"):
             logger.info("analysis already finished", extra={"job_id": job_id})
             return
-        upload = db.get(Upload, job.upload_id)
-        if upload is None:
+        source_pairs = job_service.sources_for(db, job.id)
+        if not source_pairs:
             job_service.fail(
                 db, job, phase="probing", code="source_missing",
                 message="The source upload is no longer available.", retryable=False,
             )
             return
+        source_row, upload = source_pairs[0]
         source = storage.resolve(upload.relative_source_path, settings)
         checkpoint = job.checkpoint
         source_label = (
-            {"text": job.source_name, "style": job.source_label_style}
-            if job.source_name and job.source_label_style
+            {"text": source_row.source_name, "style": source_row.source_label_style}
+            if source_row.source_name and source_row.source_label_style
             else None
         )
+        contexts = [
+            _Context(
+                job_id=job_id,
+                source_id=row.id,
+                source_order=row.order_index,
+                source_file_name=source_upload.file_name,
+                settings=settings,
+                source=storage.resolve(source_upload.relative_source_path, settings),
+                source_label=(
+                    {"text": row.source_name, "style": row.source_label_style}
+                    if row.source_name and row.source_label_style
+                    else None
+                ),
+                content_prompt=row.content_prompt_normalized,
+            )
+            for row, source_upload in source_pairs
+        ]
 
     context = _Context(
-        job_id=job_id, settings=settings, source=source, source_label=source_label
+        job_id=job_id,
+        source_id=source_row.id,
+        source_order=source_row.order_index,
+        source_file_name=upload.file_name,
+        settings=settings,
+        source=source,
+        source_label=source_label,
+        content_prompt=source_row.content_prompt_normalized,
     )
 
     try:
+        if len(contexts) > 1:
+            _run_multi_analysis(contexts, cancelled, beat)
+            return
         _stage_probe(context, checkpoint, cancelled, beat)
         _stage_detect(context, checkpoint, cancelled, beat)
         _stage_features(context, checkpoint, cancelled, beat)
@@ -151,6 +186,427 @@ def run_analysis(
         storage.remove_tree(f"{storage.job_dir(job_id)}/attempts", settings)
 
 
+def _run_multi_analysis(contexts: list[_Context], cancelled, beat) -> None:  # noqa: ANN001
+    """Prepare independent sources concurrently, then rank/finalize them together."""
+    job_id = contexts[0].job_id
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        job_service.transition(
+            db,
+            job,
+            "detecting",
+            message=f"Processing {len(contexts)} source videos in parallel.",
+        )
+
+    prepared: list[_Context] = []
+    with ThreadPoolExecutor(
+        max_workers=min(MULTI_SOURCE_WORKERS, len(contexts)),
+        thread_name_prefix="scene-source",
+    ) as executor:
+        futures = {
+            executor.submit(_prepare_source, context, cancelled, beat): context
+            for context in contexts
+        }
+        for completed, future in enumerate(as_completed(futures), start=1):
+            prepared.append(future.result())
+            with session_scope() as db:
+                job = db.get(Job, job_id)
+                if job is not None:
+                    job_service.set_progress(
+                        db,
+                        job,
+                        phase="detecting",
+                        percent=10.0 + 45.0 * (completed / len(contexts)),
+                        message=f"Prepared source {completed} of {len(contexts)}.",
+                        emit=False,
+                    )
+
+    prepared.sort(key=lambda item: item.source_order)
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        source_rows = list(
+            db.execute(select(JobSource).where(JobSource.job_id == job_id)).scalars()
+        )
+        job.detected_count = sum(row.detected_count or 0 for row in source_rows)
+        job.eligible_count = sum(row.eligible_count or 0 for row in source_rows)
+        if source_rows:
+            job.video = source_rows[0].video
+        job_service.commit_checkpoint(db, job, CHECKPOINT_PREPARED)
+
+    _rank_multi_sources(prepared, cancelled, beat)
+
+
+def _source_has_checkpoint(source: JobSource, checkpoint: str) -> bool:
+    if source.checkpoint not in job_service.CHECKPOINT_ORDER:
+        return False
+    return job_service.CHECKPOINT_ORDER.index(
+        source.checkpoint
+    ) >= job_service.CHECKPOINT_ORDER.index(
+        checkpoint,
+    )
+
+
+def _prepare_source(
+    context: _Context, cancelled, beat
+) -> _Context:  # noqa: ANN001, PLR0912, PLR0915
+    if cancelled():
+        raise AnalysisCancelled()
+    beat()
+    info = probe_media(context.source, context.settings)
+    context.info = info
+
+    with session_scope() as db:
+        source_row = db.get(JobSource, context.source_id)
+        if source_row is None:
+            raise FileNotFoundError(context.source_id)
+        source_row.video = info.to_public_video()
+        source_row.state = "processing"
+        if not _source_has_checkpoint(source_row, CHECKPOINT_PROBED):
+            source_row.checkpoint = CHECKPOINT_PROBED
+        job = db.get(Job, context.job_id)
+        if job is not None:
+            for warning in info.warnings:
+                job_service.add_warning(job, warning)
+        already_detected = _source_has_checkpoint(source_row, CHECKPOINT_DETECTED)
+
+    if not already_detected:
+        with session_scope() as db:
+            db.execute(delete(CandidateShot).where(CandidateShot.source_id == context.source_id))
+            db.execute(delete(DetectedShot).where(DetectedShot.source_id == context.source_id))
+
+        result = get_detector().detect(
+            context.source,
+            info,
+            settings=context.settings,
+            should_cancel=cancelled,
+            on_progress=lambda _fraction: beat(),
+        )
+        safe_shots = interval_module.build_safe_shots(
+            result.shots,
+            result.events,
+            result.frame_rate,
+            source_duration_us=info.duration_us,
+        )
+        with session_scope() as db:
+            job = db.get(Job, context.job_id)
+            source_row = db.get(JobSource, context.source_id)
+            assert job is not None and source_row is not None
+            eligible = 0
+            for safe_shot in safe_shots:
+                detected = DetectedShot(
+                    job_id=job.id,
+                    source_id=context.source_id,
+                    shot_number=safe_shot.shot_number,
+                    source_start_us=safe_shot.source.start_us,
+                    source_end_us=safe_shot.source.end_us,
+                    safe_start_us=(
+                        safe_shot.safe.start_us if safe_shot.safe else safe_shot.source.start_us
+                    ),
+                    safe_end_us=(
+                        safe_shot.safe.end_us if safe_shot.safe else safe_shot.source.start_us
+                    ),
+                    usable_duration_us=safe_shot.usable_duration_us,
+                    incoming_boundary=safe_shot.incoming,
+                    outgoing_boundary=safe_shot.outgoing,
+                    eligible=safe_shot.eligible,
+                    ineligible_reason=safe_shot.ineligible_reason,
+                )
+                db.add(detected)
+                db.flush()
+                if not safe_shot.eligible or safe_shot.safe is None:
+                    continue
+                recommended = interval_module.recommend_interval(
+                    safe_shot.safe, result.frame_rate
+                )
+                db.add(
+                    CandidateShot(
+                        job_id=job.id,
+                        source_id=context.source_id,
+                        detected_shot_id=detected.id,
+                        shot_number=safe_shot.shot_number,
+                        source_name=(context.source_label or {}).get("text"),
+                        source_file_name=context.source_file_name,
+                        source_start_us=safe_shot.source.start_us,
+                        source_end_us=safe_shot.source.end_us,
+                        safe_start_us=safe_shot.safe.start_us,
+                        safe_end_us=safe_shot.safe.end_us,
+                        usable_duration_us=safe_shot.usable_duration_us,
+                        recommended_start_us=recommended.start_us,
+                        recommended_end_us=recommended.end_us,
+                        is_long_shot=safe_shot.is_long_shot,
+                        incoming_boundary=safe_shot.incoming,
+                        outgoing_boundary=safe_shot.outgoing,
+                        feature_version=job.feature_version,
+                    )
+                )
+                eligible += 1
+            source_row.detected_count = len(safe_shots)
+            source_row.eligible_count = eligible
+            source_row.checkpoint = CHECKPOINT_DETECTED
+
+    with session_scope() as db:
+        source_row = db.get(JobSource, context.source_id)
+        assert source_row is not None
+        already_prepared = _source_has_checkpoint(source_row, CHECKPOINT_PREPARED)
+        candidates = list(
+            db.execute(
+                select(CandidateShot).where(CandidateShot.source_id == context.source_id)
+            ).scalars()
+        )
+        candidate_specs = [
+            (c.id, c.safe_start_us, c.safe_end_us, c.recommended_start_us, c.recommended_end_us)
+            for c in candidates
+        ]
+
+    if not already_prepared:
+        raws: dict[str, feature_module.RawFeatures] = {}
+        thumb_dir = storage.ensure_dir(
+            f"{storage.job_subdir(context.job_id, 'contact-sheets')}/thumbs",
+            context.settings,
+        )
+        for candidate_id, safe_start, safe_end, rec_start, rec_end in candidate_specs:
+            if cancelled():
+                raise AnalysisCancelled()
+            beat()
+            raws[candidate_id] = feature_module.measure_candidate(
+                context.source,
+                start_us=safe_start,
+                end_us=safe_end,
+                source_width=info.display_width,
+                source_height=info.display_height,
+                settings=context.settings,
+                should_cancel=cancelled,
+            )
+            thumbnail = thumb_dir / f"{candidate_id}.jpg"
+            if not thumbnail.exists():
+                extract_jpeg(
+                    context.source,
+                    thumbnail,
+                    position_us=(rec_start + rec_end) // 2,
+                    width=480,
+                    settings=context.settings,
+                    should_cancel=cancelled,
+                )
+
+        scored_features = feature_module.normalize_job(raws)
+        with session_scope() as db:
+            for candidate in db.execute(
+                select(CandidateShot).where(CandidateShot.source_id == context.source_id)
+            ).scalars():
+                computed = scored_features.get(candidate.id)
+                if computed is None:
+                    continue
+                candidate.features = computed.to_json()
+                candidate.local_score = computed.local_score
+                candidate.feature_version = computed.feature_version
+                candidate.thumbnail_path = storage.relative_of(
+                    thumb_dir / f"{candidate.id}.jpg", context.settings
+                )
+            source_row = db.get(JobSource, context.source_id)
+            assert source_row is not None
+            source_row.checkpoint = CHECKPOINT_PREPARED
+
+    return context
+
+
+def _rank_multi_sources(
+    contexts: list[_Context], cancelled, beat
+) -> None:  # noqa: ANN001, PLR0912, PLR0915
+    job_id = contexts[0].job_id
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        job_service.transition(
+            db,
+            job,
+            "ranking",
+            message=("Ranking candidates." if job.ranking_enabled else "Preparing manual review."),
+        )
+        ranking_enabled = job.ranking_enabled
+        job_template = copy.copy(job)
+
+    if cancelled():
+        raise AnalysisCancelled()
+
+    all_scored = []
+    outcomes = []
+    fine_windows: dict[str, Interval] = {}
+    by_source: dict[str, list[CandidateShot]] = {}
+
+    for context in contexts:
+        with session_scope() as db:
+            source_row = db.get(JobSource, context.source_id)
+            candidates = list(
+                db.execute(
+                    select(CandidateShot).where(CandidateShot.source_id == context.source_id)
+                ).scalars()
+            )
+        by_source[context.source_id] = candidates
+        if not ranking_enabled:
+            continue
+        assert source_row is not None and context.info is not None
+        source_job = copy.copy(job_template)
+        source_job.source_sha256 = source_row.source_sha256
+        source_job.content_prompt = source_row.content_prompt
+        source_job.content_prompt_normalized = source_row.content_prompt_normalized
+        feature_map = {
+            candidate.id: feature_module.Features(**candidate.features)
+            for candidate in candidates
+            if candidate.features
+        }
+        runner = RankingRunner(
+            db_factory=session_scope,
+            settings=context.settings,
+            provider=get_provider(context.settings.gemini_timeout_seconds),
+            job_id=job_id,
+            source=context.source,
+            info=context.info,
+            should_cancel=cancelled,
+        )
+        outcome = runner.run(source_job, candidates, feature_map)
+        if source_row.content_prompt_normalized:
+            _screen_for_humans(context, outcome, candidates, context.info, cancelled)
+        outcomes.append(outcome)
+        all_scored.extend(outcome.scored.values())
+        fine_windows.update(outcome.fine_windows)
+
+    source_order = {context.source_id: context.source_order for context in contexts}
+    if ranking_enabled:
+        ranked = scoring.rank(all_scored)
+        ranked_ids = [item.candidate_id for item in ranked]
+        scored_by_id = {item.candidate_id: item for item in ranked}
+    else:
+        ordered = sorted(
+            [candidate for rows in by_source.values() for candidate in rows],
+            key=lambda candidate: (source_order[candidate.source_id], candidate.source_start_us),
+        )
+        ranked_ids = [candidate.id for candidate in ordered]
+        scored_by_id = {}
+
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        rows = {
+            candidate.id: candidate
+            for candidate in db.execute(
+                select(CandidateShot).where(CandidateShot.job_id == job_id)
+            ).scalars()
+        }
+        for position, candidate_id in enumerate(ranked_ids, start=1):
+            candidate = rows[candidate_id]
+            candidate.rank = position
+            if ranking_enabled:
+                item = scored_by_id[candidate_id]
+                candidate.score = item.final_score
+                candidate.confidence = item.confidence
+                candidate.reason = item.reason
+                candidate.reason_code = item.reason_code
+                candidate.scoring_source = item.scoring_source
+                candidate.cache_status = item.cache_status
+                candidate.prompt_relevance_evaluated = item.prompt_relevance_evaluated
+                candidate.motion_ambiguous = item.motion_ambiguous
+                candidate.gemini_relevance = item.relevance
+                candidate.gemini_interest = item.interest
+                candidate.gemini_clarity = item.clarity
+                candidate.human_present = item.human_present
+                candidate.human_source = item.human_source
+                candidate.product_visible = item.product_visible
+                candidate.product_prominence = item.product_prominence
+                candidate.excluded_reason = item.excluded_reason
+                window = fine_windows.get(candidate_id)
+                if window is not None and Interval(
+                    candidate.safe_start_us, candidate.safe_end_us
+                ).contains(window):
+                    candidate.recommended_start_us = window.start_us
+                    candidate.recommended_end_us = window.end_us
+            else:
+                candidate.score = 0.0
+                candidate.confidence = 0.0
+                candidate.reason = ""
+                candidate.scoring_source = "local-fallback"
+                candidate.prompt_relevance_evaluated = False
+
+        for outcome in outcomes:
+            for warning in outcome.warnings:
+                job_service.add_warning(job, warning)
+        if outcomes:
+            statuses = {outcome.cache_status for outcome in outcomes}
+            cache_status = "complete" if statuses == {"complete"} else (
+                "partial" if statuses - {"none"} else "none"
+            )
+            budget_module.set_cache_status(db, job.id, cache_status)
+            fallback = next(
+                (outcome.fallback_reason for outcome in outcomes if outcome.fallback_reason),
+                None,
+            )
+            if fallback:
+                budget_module.mark_fallback(db, job.id, fallback)
+
+        candidates = list(rows.values())
+        selected = (
+            review.auto_select(db, job, candidates)
+            if ranking_enabled
+            else []
+        )
+        if not ranking_enabled:
+            review.begin_manual_review(db, job)
+
+        for source_row in db.execute(
+            select(JobSource).where(JobSource.job_id == job_id)
+        ).scalars():
+            source_row.checkpoint = CHECKPOINT_RANKED
+            source_row.state = "ready"
+        job_service.commit_checkpoint(db, job, CHECKPOINT_RANKED)
+        job_service.set_progress(
+            db,
+            job,
+            phase="ranking",
+            percent=95.0,
+            message=(
+                f"Ranked {len(candidates)} candidate(s)."
+                if ranking_enabled
+                else f"Prepared {len(candidates)} candidate(s) for manual review."
+            ),
+        )
+        selected_by_source: dict[str, list[tuple[str, int, int]]] = {}
+        for clip in selected[:EAGER_PREVIEW_LIMIT]:
+            candidate = rows.get(clip.candidate_id)
+            if candidate is not None:
+                selected_by_source.setdefault(candidate.source_id, []).append(
+                    (clip.candidate_id, clip.start_us, clip.end_us)
+                )
+
+    for context in contexts:
+        _render_previews(
+            context,
+            selected_by_source.get(context.source_id, []),
+            cancelled,
+            beat,
+        )
+
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        assert job is not None
+        job_service.transition(
+            db,
+            job,
+            "review-ready",
+            message="Ready for review." if ranking_enabled else "Ready for manual review.",
+        )
+        events.append(
+            db,
+            job.id,
+            events.CANDIDATES_READY,
+            {
+                "eligibleCount": job.eligible_count,
+                "selectedCount": job.selected_count,
+                "reviewRevision": job.review_revision,
+            },
+        )
+
+
 # --- Stage A ---------------------------------------------------------------
 
 
@@ -174,6 +630,11 @@ def _stage_probe(context: _Context, checkpoint: str | None, cancelled, beat) -> 
         job = db.get(Job, context.job_id)
         assert job is not None
         job.video = info.to_public_video()
+        source_row = db.get(JobSource, context.source_id)
+        if source_row is not None:
+            source_row.video = info.to_public_video()
+            source_row.checkpoint = CHECKPOINT_PROBED
+            source_row.state = "processing"
         for warning in info.warnings:
             job_service.add_warning(job, warning)
         job_service.set_progress(
@@ -243,10 +704,15 @@ def _stage_detect(context: _Context, checkpoint: str | None, cancelled, beat) ->
         for safe_shot in safe_shots:
             detected = DetectedShot(
                 job_id=job.id,
+                source_id=context.source_id,
                 shot_number=safe_shot.shot_number,
                 source_start_us=safe_shot.source.start_us,
                 source_end_us=safe_shot.source.end_us,
-                safe_start_us=safe_shot.safe.start_us if safe_shot.safe else safe_shot.source.start_us,
+                safe_start_us=(
+                    safe_shot.safe.start_us
+                    if safe_shot.safe
+                    else safe_shot.source.start_us
+                ),
                 safe_end_us=safe_shot.safe.end_us if safe_shot.safe else safe_shot.source.start_us,
                 usable_duration_us=safe_shot.usable_duration_us,
                 incoming_boundary=safe_shot.incoming,
@@ -266,8 +732,11 @@ def _stage_detect(context: _Context, checkpoint: str | None, cancelled, beat) ->
             db.add(
                 CandidateShot(
                     job_id=job.id,
+                    source_id=context.source_id,
                     detected_shot_id=detected.id,
                     shot_number=safe_shot.shot_number,
+                    source_name=(context.source_label or {}).get("text"),
+                    source_file_name=context.source_file_name,
                     source_start_us=safe_shot.source.start_us,
                     source_end_us=safe_shot.source.end_us,
                     safe_start_us=safe_shot.safe.start_us,
@@ -285,6 +754,11 @@ def _stage_detect(context: _Context, checkpoint: str | None, cancelled, beat) ->
 
         job.detected_count = len(safe_shots)
         job.eligible_count = eligible
+        source_row = db.get(JobSource, context.source_id)
+        if source_row is not None:
+            source_row.detected_count = len(safe_shots)
+            source_row.eligible_count = eligible
+            source_row.checkpoint = CHECKPOINT_DETECTED
         job_service.set_progress(
             db,
             job,
@@ -396,12 +870,17 @@ def _stage_features(context: _Context, checkpoint: str | None, cancelled, beat) 
             db, job, phase="detecting", percent=55.0, message="Local measurements complete."
         )
         job_service.commit_checkpoint(db, job, CHECKPOINT_PREPARED)
+        source_row = db.get(JobSource, context.source_id)
+        if source_row is not None:
+            source_row.checkpoint = CHECKPOINT_PREPARED
 
 
 # --- Stage F through J -----------------------------------------------------
 
 
-def _stage_rank(context: _Context, cancelled, beat) -> None:  # noqa: ANN001
+def _stage_rank(
+    context: _Context, cancelled, beat
+) -> None:  # noqa: ANN001, PLR0912, PLR0915
     with session_scope() as db:
         job = db.get(Job, context.job_id)
         assert job is not None
@@ -412,6 +891,10 @@ def _stage_rank(context: _Context, cancelled, beat) -> None:  # noqa: ANN001
             ).scalars()
         )
         job_snapshot = job
+
+    if not job_snapshot.ranking_enabled:
+        _finish_manual_ranking(context, candidates, cancelled, beat)
+        return
 
     if cancelled():
         raise AnalysisCancelled()
@@ -509,6 +992,10 @@ def _stage_rank(context: _Context, cancelled, beat) -> None:  # noqa: ANN001
             job_service.add_warning(job, "fewer_eligible_than_requested")
 
         job_service.commit_checkpoint(db, job, CHECKPOINT_RANKED)
+        source_row = db.get(JobSource, context.source_id)
+        if source_row is not None:
+            source_row.checkpoint = CHECKPOINT_RANKED
+            source_row.state = "ready"
         job_service.set_progress(
             db,
             job,
@@ -535,6 +1022,65 @@ def _stage_rank(context: _Context, cancelled, beat) -> None:  # noqa: ANN001
                 "selectedCount": job.selected_count,
                 "reviewRevision": job.review_revision,
                 "partialResultReason": job.partial_result_reason,
+            },
+        )
+
+
+def _finish_manual_ranking(
+    context: _Context,
+    candidates: list[CandidateShot],
+    cancelled: Callable[[], bool],
+    beat: Callable[[], None],
+) -> None:
+    """Publish candidates in source order without scoring or preselection."""
+    if cancelled():
+        raise AnalysisCancelled()
+    beat()
+    ordered_ids = [
+        candidate.id
+        for candidate in sorted(candidates, key=lambda item: item.source_start_us)
+    ]
+    with session_scope() as db:
+        job = db.get(Job, context.job_id)
+        assert job is not None
+        rows = {
+            candidate.id: candidate
+            for candidate in db.execute(
+                select(CandidateShot).where(CandidateShot.job_id == job.id)
+            ).scalars()
+        }
+        for rank, candidate_id in enumerate(ordered_ids, start=1):
+            candidate = rows[candidate_id]
+            candidate.rank = rank
+            candidate.score = 0.0
+            candidate.confidence = 0.0
+            candidate.reason = ""
+            candidate.reason_code = None
+            candidate.scoring_source = "local-fallback"
+            candidate.prompt_relevance_evaluated = False
+
+        review.begin_manual_review(db, job)
+        job_service.commit_checkpoint(db, job, CHECKPOINT_RANKED)
+        source_row = db.get(JobSource, context.source_id)
+        if source_row is not None:
+            source_row.checkpoint = CHECKPOINT_RANKED
+            source_row.state = "ready"
+        job_service.set_progress(
+            db,
+            job,
+            phase="ranking",
+            percent=100.0,
+            message=f"Prepared {len(ordered_ids)} candidate(s) for manual review.",
+        )
+        job_service.transition(db, job, "review-ready", message="Ready for manual review.")
+        events.append(
+            db,
+            job.id,
+            events.CANDIDATES_READY,
+            {
+                "eligibleCount": job.eligible_count,
+                "selectedCount": 0,
+                "reviewRevision": job.review_revision,
             },
         )
 
@@ -665,14 +1211,15 @@ def ensure_preview(job_id: str, candidate_id: str, settings: Settings) -> Path:
         if candidate is None or candidate.job_id != job_id:
             raise FileNotFoundError(candidate_id)
         job = db.get(Job, job_id)
-        upload = db.get(Upload, job.upload_id) if job else None
-        if upload is None:
+        source_row = db.get(JobSource, candidate.source_id)
+        upload = db.get(Upload, source_row.upload_id) if source_row else None
+        if job is None or source_row is None or upload is None:
             raise FileNotFoundError(candidate_id)
         source = storage.resolve(upload.relative_source_path, settings)
         start_us, end_us = candidate.recommended_start_us, candidate.recommended_end_us
         source_label = (
-            {"text": job.source_name, "style": job.source_label_style}
-            if job and job.source_name and job.source_label_style
+            {"text": source_row.source_name, "style": source_row.source_label_style}
+            if source_row.source_name and source_row.source_label_style
             else None
         )
 
