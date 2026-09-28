@@ -104,18 +104,29 @@ All media positions in APIs and persistence MUST use integer microseconds. Frame
 
 ## 4. Primary User Flow
 
-1. The user signs in with the shared administrator credentials.
-2. The user opens Settings and adds or replaces a Gemini API key.
+1. The application creates the local browser session automatically.
+2. The user may open Settings and add or replace a Gemini API key.
 3. The backend validates the key and saves only encrypted key material.
-4. The user creates an upload by dragging or selecting one supported video.
-5. The browser uploads sequential chunks and can resume from the last verified byte.
-6. After verification, the user configures:
+4. The user builds an ordered list of up to 12 source rows. Each row contains
+   either one public video link or one supported local video file, plus its own
+   editable source name and optional instruction.
+5. Link downloads and file uploads may run concurrently. Every completion MUST
+   update its originating row by stable client ID and MUST NOT reorder sources.
+   A link import SHOULD suggest the video's channel/uploader display name in an
+   untouched source-name field. User-entered or subsequently edited names MUST
+   never be overwritten by download metadata.
+   File uploads use sequential resumable chunks.
+6. Before analysis, the user reviews the prepared rows and configures:
    - target clip count, default `20`, allowed range `1–100`;
    - optional per-video source name, maximum 48 characters;
    - optional focus prompt, maximum 2,000 characters;
    - Gemini request cap, inherited from the administrator default;
    - whether analysis may use the configured Gemini key.
-7. The job progresses through probing, detection, local preparation, and ranking.
+7. The job progresses through probing, detection, local preparation, ranking,
+   and preview rendering. During a multi-source job, the review page displays
+   a durable progress card for each source in configured order. Each card shows
+   its real current task, percentage, latest activity time, and detected/usable
+   counts when known; faster sources MUST NOT reorder the cards.
 8. The review page displays the automatically selected top candidates and any fallback or partial-result warning.
 9. The user previews clips, removes clips, changes their order, or adjusts trims within the safe interval.
 10. The user selects one or more output resolutions and chooses whether to keep audio.
@@ -191,13 +202,15 @@ Each job snapshots the following values so later setting changes do not alter an
 The default target is 20 clips. Valid targets are 1–100.
 
 The optional source name is normalized to one uppercase line with a maximum of
-48 characters. Latin letters and combining marks, numbers, spaces, and
-punctuation are accepted; control characters and non-Latin scripts are
-rejected. A blank name stores no style snapshot and leaves previews and exports
-unlabelled. Global source-label settings provide four bundled presets (Bebas
-Neue, Anton, Oswald SemiBold, and Roboto Condensed Bold), opaque six-digit fill
-and outline colors, and a responsive size from 2.5% to 8% in 0.25% increments.
-Changing those defaults affects only subsequently created jobs.
+48 characters. Latin, Chinese, Japanese, and Korean letters, combining marks,
+numbers, spaces, and punctuation are accepted; control characters and
+unsupported scripts are rejected. CJK labels use the Noto CJK fallback in the
+application image so previews and final exports contain the same glyphs. A
+blank name stores no style snapshot and leaves previews and exports unlabelled.
+Global source-label settings provide four bundled presets (Bebas Neue, Anton,
+Oswald SemiBold, and Roboto Condensed Bold), opaque six-digit fill and outline
+colors, and a responsive size from 2.5% to 8% in 0.25% increments. Changing
+those defaults affects only subsequently created jobs.
 
 `useGemini` defaults to true when a key is configured and false otherwise. If it is true but no usable key remains when ranking begins, the job completes with local fallback and a warning instead of losing its local work.
 
@@ -215,6 +228,13 @@ complete → exporting → complete  (later export)
 - Probing, detecting, and ranking MAY transition to `failed` or `cancelled`.
 - Export work has its own state. A failed or cancelled export returns the job to its previous stable state: `review-ready` for the first export or `complete` for a later export.
 - Progress percentage MUST be monotonic within a stage.
+- Each job source MUST persist its current analysis phase, monotonic percentage,
+  and a concise activity message. Long-running frame scans and candidate
+  measurements MUST update those source snapshots periodically.
+- While analysis is active, the frontend MUST present per-source progress and
+  refresh between durable state-transition events. It MUST distinguish a live
+  connection from reconnecting/refreshing state and MUST NOT invent time-based
+  progress unrelated to worker measurements.
 - The application MUST persist stage checkpoints before acknowledging completion.
 - A disconnected client can reconnect without affecting the worker.
 - Cancellation MUST stop new work, terminate the active media subprocess, remove attempt-only temporary files, and retain the verified source and completed checkpoints.

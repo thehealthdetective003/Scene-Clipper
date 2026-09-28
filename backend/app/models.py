@@ -208,6 +208,10 @@ class Upload(Base, TimestampMixin):
     #: placed in a Redis queue payload.
     source_kind: Mapped[str] = mapped_column(String(16), default="file", nullable=False)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Display-safe uploader/channel metadata suggested to the browser for URL
+    #: imports.  It is never treated as authoritative: users may edit it before
+    #: creating a job, and job creation performs the final label validation.
+    suggested_source_name: Mapped[str | None] = mapped_column(String(48), nullable=True)
 
     #: Authoritative server-computed digest, set at completion.
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -324,6 +328,11 @@ class JobSource(Base, TimestampMixin):
     video: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     checkpoint: Mapped[str | None] = mapped_column(String(32), nullable=True)
     state: Mapped[str] = mapped_column(String(16), default="queued", nullable=False)
+    progress_phase: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    progress_percent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    progress_message: Mapped[str] = mapped_column(
+        String(255), default="Waiting to start.", nullable=False
+    )
     detected_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     eligible_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

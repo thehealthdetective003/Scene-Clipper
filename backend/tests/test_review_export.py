@@ -319,6 +319,43 @@ class TestPreviewAccess:
 
 
 class TestExport:
+    def test_queue_handoff_commits_first_and_reports_an_outage(
+        self, auth_client, analysed_job, monkeypatch
+    ):
+        from app.api import routes_exports
+        from app.db import session_scope
+        from app.models import Export
+
+        job_id, body = analysed_job
+        observed_states: list[str] = []
+
+        def unavailable(export_id: str) -> bool:
+            # This separate transaction sees exactly what a fast RQ worker
+            # sees when it receives the task.
+            with session_scope() as separate_db:
+                queued = separate_db.get(Export, export_id)
+                assert queued is not None
+                observed_states.append(queued.state)
+            return False
+
+        monkeypatch.setattr(routes_exports, "enqueue_export", unavailable)
+        response = auth_client.post(
+            f"{JOBS}/{job_id}/exports",
+            json={
+                "reviewRevision": body["reviewRevision"],
+                "resolutions": ["original"],
+                "includeAudio": True,
+            },
+        )
+
+        assert response.status_code == 202
+        assert observed_states == ["queued"]
+        record = response.json()
+        assert record["state"] == "failed"
+        assert record["error"]["code"] == "export_queue_unavailable"
+        assert record["error"]["retryable"] is True
+        assert auth_client.get(f"{JOBS}/{job_id}").json()["state"] == "review-ready"
+
     def test_source_label_is_visible_in_preview_and_export(
         self, auth_client, tmp_path, settings
     ):

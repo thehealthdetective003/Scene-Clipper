@@ -97,17 +97,25 @@ marked `Secure` for every non-loopback deployment.
    responsive size. New jobs snapshot these defaults. You can also add a
    Gemini API key (optional); it is validated, encrypted with AES-256-GCM, and
    never displayed again — not even partially.
-3. **New job** → add up to 12 MP4/MOV/MKV/WebM files, public video links, or a
-   mix of both. Put one URL per line and Scene Clipper downloads the videos in
-   the highest available quality. File uploads and link downloads start
-   concurrently; file uploads remain resumable. Playlists, channels, private
-   videos, and live/upcoming streams are not imported.
-4. Give each source its own optional source name and ranking instruction. A
-   source name is normalized to one uppercase Latin-script line and appears at
-   the top left of that source's review previews and exported MP4s. Automatic
-   ranking and preselection are optional; leave them off to start with a blank
-   manual selection.
-5. Watch progress live. Closing the tab does not affect the job.
+3. **New job** → build up to 12 numbered source rows containing public video
+   links, MP4/MOV/MKV/WebM files, or a mix of both. Each row accepts its source
+   name before preparation and keeps that name editable afterward. Add another
+   link or file with the controls below the list. Transfers run concurrently,
+   but completion speed never changes the visible or submitted source order.
+   Link imports use the highest available quality and automatically suggest the
+   video's channel name as an editable source name. File uploads are resumable.
+   Playlists, channels, private videos, and live/upcoming streams are not imported.
+4. A source name is normalized to one uppercase line and appears at the top
+   left of that source's review previews and exported MP4s. Latin, Chinese,
+   Japanese, and Korean names are supported. Each source also has an independent
+   ranking instruction. Automatic ranking and preselection are optional; leave
+   them off to start with a blank manual selection.
+5. Watch progress live. The analysis dashboard shows the real task and
+   percentage for every source independently: metadata reading, frame scanning,
+   candidate measurement, ranking/manual preparation, and preview rendering.
+   It also reports detected and usable-scene counts as they become available.
+   Closing the tab does not affect the job, and reopening it restores the
+   durable progress snapshot.
 6. **Review**: preview clips, deselect, reorder by drag, and adjust trims. The
    handles cannot leave the safe interval, and the server revalidates and
    frame-quantizes every trim anyway.

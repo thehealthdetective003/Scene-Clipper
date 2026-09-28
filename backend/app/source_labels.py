@@ -43,6 +43,27 @@ _COMBINING_MARK_RANGES = (
     (0x20D0, 0x20FF),
     (0xFE20, 0xFE2F),
 )
+_CJK_NAME_MARKERS = (
+    "BOPOMOFO",
+    "CJK",
+    "HANGUL",
+    "HIRAGANA",
+    "IDEOGRAPHIC",
+    "KATAKANA",
+)
+
+# The application image installs fonts-noto-cjk. The extra locations make
+# direct development on Windows and macOS behave like the container without
+# requiring a second copy of the large font in the repository.
+CJK_FONT_CANDIDATES = (
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    Path("C:/Windows/Fonts/msyhbd.ttc"),
+    Path("C:/Windows/Fonts/msyh.ttc"),
+    Path("C:/Windows/Fonts/malgunbd.ttf"),
+    Path("C:/Windows/Fonts/malgun.ttf"),
+    Path("/System/Library/Fonts/PingFang.ttc"),
+)
 
 
 def default_style() -> dict[str, Any]:
@@ -97,9 +118,8 @@ def normalize_style(style: dict[str, Any]) -> dict[str, Any]:
 def normalize_source_name(value: str | None) -> str | None:
     """Normalize an optional source name to the exact rendered text.
 
-    Source labels are intentionally limited to Latin-script names in this
-    version because all four curated display fonts have reliable Latin
-    coverage.  Numbers, punctuation, combining marks, spaces, and a few common
+    Latin and CJK names are supported by the fonts shipped in the application
+    image. Numbers, punctuation, combining marks, spaces, and a few common
     source-name symbols remain available.
     """
     if value is None:
@@ -126,14 +146,15 @@ def normalize_source_name(value: str | None) -> str | None:
             continue
         category = unicodedata.category(char)
         if category.startswith("L"):
-            if "LATIN" not in unicodedata.name(char, ""):
-                raise ValueError("This version supports Latin-script source names only.")
+            name = unicodedata.name(char, "")
+            if "LATIN" not in name and not any(marker in name for marker in _CJK_NAME_MARKERS):
+                raise ValueError("Source names support Latin, Chinese, Japanese, and Korean text.")
             continue
         if category.startswith("M"):
             codepoint = ord(char)
             if any(start <= codepoint <= end for start, end in _COMBINING_MARK_RANGES):
                 continue
-            raise ValueError("This version supports Latin-script source names only.")
+            raise ValueError("Source names support Latin, Chinese, Japanese, and Korean text.")
         if category[0] in {"N", "P"} or char in _EXTRA_SYMBOLS:
             continue
         raise ValueError("The source name contains an unsupported character.")
@@ -145,4 +166,19 @@ def font_path(font_preset: str) -> Path:
     """Resolve a validated preset to a packaged font file."""
     preset = normalize_font_preset(font_preset)
     return Path(__file__).resolve().parent / "assets" / "fonts" / FONT_PRESETS[preset]
+
+
+def font_path_for_text(font_preset: str, text: str) -> Path:
+    """Choose the configured display font or the CJK glyph fallback."""
+    if not any(
+        unicodedata.category(char).startswith("L")
+        and "LATIN" not in unicodedata.name(char, "")
+        for char in text
+    ):
+        return font_path(font_preset)
+
+    for candidate in CJK_FONT_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("The Noto CJK source-label font is not installed.")
 

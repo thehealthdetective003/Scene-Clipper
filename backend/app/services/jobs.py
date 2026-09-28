@@ -205,6 +205,9 @@ def create_job(
                 content_prompt=configured_prompt.strip() if configured_prompt else None,
                 content_prompt_normalized=normalize_prompt(configured_prompt),
                 state="queued",
+                progress_phase="queued",
+                progress_percent=0.0,
+                progress_message="Waiting for analysis to start.",
             )
         )
         upload.reference_count += 1

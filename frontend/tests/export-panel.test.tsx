@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -45,6 +46,38 @@ describe("completed export downloads", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     delete window.showDirectoryPicker;
+  });
+
+  it("polls a queued export to completion when its live event is missed", async () => {
+    const queuedExport = {
+      ...completedExport,
+      state: "queued",
+      progress: { phase: "queued", percent: 0, message: "Queued for export." },
+    } as ExportRecord;
+    vi.spyOn(api, "getExport").mockResolvedValue(completedExport);
+    vi.spyOn(api, "exportFiles").mockResolvedValue({
+      files: [exportedFile],
+      zipDownloadUrl: "/api/v1/jobs/job-1/exports/export-1/download",
+      sourceBundles: [],
+    });
+
+    function PollingHarness() {
+      const [record, setRecord] = useState<ExportRecord>(queuedExport);
+      return (
+        <ExportPanel
+          job={job}
+          selectedCount={1}
+          activeExport={record}
+          onStarted={setRecord}
+        />
+      );
+    }
+
+    render(<PollingHarness />);
+
+    expect(await screen.findByRole("button", { name: /download zip/i })).toBeVisible();
+    expect(api.getExport).toHaveBeenCalledWith("job-1", "export-1");
+    expect(screen.queryByText("Queued for export.")).not.toBeInTheDocument();
   });
 
   it("offers individual files and an editable ZIP name for the current review", async () => {

@@ -54,6 +54,12 @@ def test_manual_multi_source_job_can_select_and_export_across_sources(auth_clien
         "SECOND SOURCE",
     ]
     assert all(source["video"] is not None for source in job["sources"])
+    assert all(source["state"] == "ready" for source in job["sources"])
+    assert all(source["progress"]["phase"] == "ready" for source in job["sources"])
+    assert all(source["progress"]["percent"] == 100 for source in job["sources"])
+    assert all(source["progress"]["message"] == "Analysis complete." for source in job["sources"])
+    assert all(source["detectedCount"] is not None for source in job["sources"])
+    assert all(source["eligibleCount"] is not None for source in job["sources"])
 
     review = auth_client.get(f"{JOBS}/{job_id}/candidates").json()
     assert review["selectedClips"] == []

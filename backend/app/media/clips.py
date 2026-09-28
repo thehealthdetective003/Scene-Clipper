@@ -30,7 +30,7 @@ from app.config import Settings, get_settings
 from app.media.probe import MediaInfo, probe_media
 from app.media.runner import check_tool, ffmpeg_binary, run_tool
 from app.media.timebase import US_PER_SECOND, frame_duration_us_ceil, parse_rational
-from app.source_labels import font_path, normalize_source_name, normalize_style
+from app.source_labels import font_path_for_text, normalize_source_name, normalize_style
 
 #: Resolution presets (spec 5.7).
 RESOLUTION_BOUNDS = {
@@ -168,7 +168,10 @@ def _source_label_filter(
         yield None
         return
 
-    selected_font = font_path(str(style["fontPreset"]))
+    try:
+        selected_font = font_path_for_text(str(style["fontPreset"]), text)
+    except FileNotFoundError as exc:
+        raise ClipRenderError("The multilingual source-label font is missing.") from exc
     if not selected_font.is_file():
         raise ClipRenderError("A bundled source-label font is missing.")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from app.logging_setup import get_logger
 from app.media.runner import ffmpeg_binary
 from app.models import Upload
 from app.services import storage, uploads
+from app.source_labels import SOURCE_NAME_MAX_CHARS, normalize_source_name
 from app.util.ids import new_id
 
 logger = get_logger("app.downloading")
@@ -83,7 +85,7 @@ def run_url_download(
         with storage.attempt_directory(
             storage.upload_dir(upload_id), new_id(), settings
         ) as workspace:
-            title, downloaded = _download(
+            title, suggested_source_name, downloaded = _download(
                 source_url,
                 workspace,
                 upload_id=upload_id,
@@ -117,6 +119,7 @@ def run_url_download(
                     db,
                     upload,
                     title=title,
+                    suggested_source_name=suggested_source_name,
                     extension=extension,
                     size_bytes=size_bytes,
                 )
@@ -147,7 +150,7 @@ def _download(
     settings: Settings,
     should_cancel: Callable[[], bool] | None,
     heartbeat: Callable[[], None] | None,
-) -> tuple[str | None, Path]:  # noqa: PLR0915 - one yt-dlp transaction
+) -> tuple[str | None, str | None, Path]:  # noqa: PLR0915 - one yt-dlp transaction
 
     last_persisted_at = 0.0
     hook_error: UrlDownloadError | UrlDownloadCancelled | None = None
@@ -230,6 +233,7 @@ def _download(
                 raise UrlDownloadCancelled()
             downloader.process_ie_result(info, download=True)
             title = _safe_title(info.get("title"))
+            suggested_source_name = _suggested_source_name(info)
     except (UrlDownloadError, UrlDownloadCancelled):
         raise
     except DownloadError as exc:
@@ -254,7 +258,7 @@ def _download(
         raise UrlDownloadError(
             "video_not_found", "The download finished without producing a usable video file."
         )
-    return title, max(candidates, key=lambda path: path.stat().st_size)
+    return title, suggested_source_name, max(candidates, key=lambda path: path.stat().st_size)
 
 
 def _assert_public_origin(url: str) -> None:
@@ -308,6 +312,49 @@ def _safe_title(value: Any) -> str | None:
         return None
     cleaned = "".join(char for char in value if char.isprintable() and char not in "\r\n\t").strip()
     return cleaned[:220] or None
+
+
+def _suggested_source_name(info: dict[str, Any]) -> str | None:
+    """Return the first channel-like yt-dlp field that is safe to render.
+
+    ``channel`` is the YouTube channel display name.  The fallbacks also make
+    the feature useful for other supported sites without exposing handles or
+    extractor-internal IDs as a source label.
+    """
+    for field in ("channel", "uploader", "creator"):
+        cleaned = _safe_source_name(info.get(field))
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _safe_source_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    # Channel names frequently decorate otherwise renderable names with emoji.
+    # Drop only unsupported glyphs instead of discarding the useful channel
+    # text; final validation still uses the same contract as job creation.
+    safe_characters: list[str] = []
+    for char in unicodedata.normalize("NFKC", value):
+        if char.isspace():
+            safe_characters.append(" ")
+            continue
+        try:
+            normalize_source_name(char)
+        except ValueError:
+            safe_characters.append(" ")
+        else:
+            safe_characters.append(char)
+
+    cleaned = " ".join("".join(safe_characters).split())[:SOURCE_NAME_MAX_CHARS].strip()
+    if not cleaned:
+        return None
+    try:
+        normalize_source_name(cleaned)
+    except ValueError:
+        return None
+    return cleaned
 
 
 def _persist_progress(upload_id: str, downloaded_bytes: int, total_bytes: int | None) -> None:

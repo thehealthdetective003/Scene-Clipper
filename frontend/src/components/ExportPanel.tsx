@@ -28,6 +28,7 @@ import {
 } from "./ui/Primitives";
 
 const SEQUENTIAL_DOWNLOAD_GAP_MS = 600;
+const EXPORT_POLL_INTERVAL_MS = 1500;
 
 const RESOLUTIONS: Array<{ value: Resolution; label: string; hint: string }> = [
   { value: "original", label: "Original", hint: "Source display size" },
@@ -77,6 +78,35 @@ export function ExportPanel({ job, selectedCount, activeExport, onStarted }: Pro
   const complete = activeExport?.state === "complete";
   const currentExport = complete && activeExport.reviewRevision === job.reviewRevision;
   const jobSources = job.sources ?? [];
+
+  // SSE makes completion immediate; polling keeps durable progress accurate
+  // after a disconnect, browser sleep, proxy timeout, or missed event.
+  useEffect(() => {
+    if (!running || !exportId) return;
+
+    let disposed = false;
+    let requestActive = false;
+    const refresh = async () => {
+      if (requestActive) return;
+      requestActive = true;
+      try {
+        const record = await api.getExport(job.id, exportId);
+        if (!disposed) onStarted(record);
+      } catch {
+        // The next poll or SSE event can recover without interrupting the
+        // background export.
+      } finally {
+        requestActive = false;
+      }
+    };
+
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), EXPORT_POLL_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [running, exportId, job.id, onStarted]);
 
   const loadFiles = useCallback(async () => {
     if (!exportId || !complete) {

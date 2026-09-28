@@ -15,7 +15,7 @@ from app.config import get_settings, reset_settings_cache
 from app.db import session_scope
 from app.media.clips import _font_size_that_fits, _source_label_filter
 from app.models import Upload
-from app.source_labels import FONT_PRESETS, font_path
+from app.source_labels import FONT_PRESETS, font_path, font_path_for_text
 
 SETTINGS = "/api/v1/settings/source-label"
 JOBS = "/api/v1/jobs"
@@ -132,6 +132,19 @@ class TestSourceLabelJobs:
         assert response.status_code == 202
         assert response.json()["sourceLabel"] is None
 
+    def test_cjk_name_is_accepted_and_snapshotted(self, auth_client):
+        response = auth_client.post(
+            JOBS,
+            json={
+                "uploadId": ready_upload(),
+                "targetClipCount": 1,
+                "sourceName": "  环球时报 Global Times  ",
+                "useGemini": False,
+            },
+        )
+        assert response.status_code == 202, response.text
+        assert response.json()["sourceLabel"]["text"] == "环球时报 GLOBAL TIMES"
+
     def test_idempotent_creation_replays_the_same_labelled_job(self, auth_client):
         payload = {
             "uploadId": ready_upload(),
@@ -151,7 +164,7 @@ class TestSourceLabelJobs:
         "name",
         [
             "TORQUE\nYOU",
-            "\u4e2d\u56fd\u6c7d\u8f66",
+            "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a",
             "\u064e",
             "CAR \U0001f697",
             "A" * 49,
@@ -187,6 +200,12 @@ def test_drawtext_uses_a_text_file_and_never_interpolates_the_name(tmp_path):
             == label["text"]
         )
     assert not list(tmp_path.glob("source-label-*.txt"))
+
+
+def test_cjk_labels_choose_the_multilingual_fallback(monkeypatch):
+    fallback = font_path("roboto-condensed-bold")
+    monkeypatch.setattr("app.source_labels.CJK_FONT_CANDIDATES", (fallback,))
+    assert font_path_for_text("bebas-neue", "环球时报") == fallback
 
 
 @pytest.mark.parametrize(

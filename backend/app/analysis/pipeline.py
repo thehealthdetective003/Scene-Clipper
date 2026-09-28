@@ -9,6 +9,7 @@ repeating completed work, and a resumed run produces no duplicate candidates.
 from __future__ import annotations
 
 import copy
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -64,6 +65,60 @@ class _Context:
     source_label: dict | None = None
     content_prompt: str | None = None
     info: MediaInfo | None = None
+
+
+def _source_display_name(context: _Context) -> str:
+    label = (context.source_label or {}).get("text")
+    return str(label or context.source_file_name)
+
+
+def _record_source_progress(
+    context: _Context,
+    phase: str,
+    percent: float,
+    message: str,
+) -> None:
+    """Persist real source activity and roll it into the job's overall progress.
+
+    Per-frame callbacks do not create durable SSE rows; the active job page
+    polls this compact snapshot. Stage transitions still emit immediately.
+    """
+    with session_scope() as db:
+        source_row = db.get(JobSource, context.source_id)
+        job = db.get(Job, context.job_id)
+        if source_row is None or job is None:
+            return
+
+        source_row.progress_phase = phase
+        source_row.progress_percent = max(
+            source_row.progress_percent,
+            min(100.0, max(0.0, percent)),
+        )
+        source_row.progress_message = message[:255]
+        source_row.state = "ready" if phase == "ready" else "processing"
+
+        source_rows = list(
+            db.execute(
+                select(JobSource).where(JobSource.job_id == context.job_id)
+            ).scalars()
+        )
+        average = sum(row.progress_percent for row in source_rows) / max(1, len(source_rows))
+        ready_count = sum(row.progress_phase == "ready" for row in source_rows)
+        source_message = f"{_source_display_name(context)}: {message}"
+        overall_message = (
+            f"{ready_count} of {len(source_rows)} sources ready · {source_message}"
+            if len(source_rows) > 1
+            else message
+        )
+        if job.state in job_service.RESUMABLE_STATES:
+            job_service.set_progress(
+                db,
+                job,
+                phase=job.state,
+                percent=min(95.0, 2.0 + 0.93 * average),
+                message=overall_message,
+                emit=False,
+            )
 
 
 def run_analysis(
@@ -199,28 +254,26 @@ def _run_multi_analysis(contexts: list[_Context], cancelled, beat) -> None:  # n
             message=f"Processing {len(contexts)} source videos in parallel.",
         )
 
+    progress_lock = threading.Lock()
+
+    def report(context: _Context, phase: str, percent: float, message: str) -> None:
+        # SQLite supports concurrent readers but serializes writers. Keeping
+        # these tiny progress commits ordered avoids lock contention between
+        # source worker threads without serializing any media processing.
+        with progress_lock:
+            _record_source_progress(context, phase, percent, message)
+
     prepared: list[_Context] = []
     with ThreadPoolExecutor(
         max_workers=min(MULTI_SOURCE_WORKERS, len(contexts)),
         thread_name_prefix="scene-source",
     ) as executor:
         futures = {
-            executor.submit(_prepare_source, context, cancelled, beat): context
+            executor.submit(_prepare_source, context, cancelled, beat, report): context
             for context in contexts
         }
-        for completed, future in enumerate(as_completed(futures), start=1):
+        for future in as_completed(futures):
             prepared.append(future.result())
-            with session_scope() as db:
-                job = db.get(Job, job_id)
-                if job is not None:
-                    job_service.set_progress(
-                        db,
-                        job,
-                        phase="detecting",
-                        percent=10.0 + 45.0 * (completed / len(contexts)),
-                        message=f"Prepared source {completed} of {len(contexts)}.",
-                        emit=False,
-                    )
 
     prepared.sort(key=lambda item: item.source_order)
     with session_scope() as db:
@@ -249,10 +302,11 @@ def _source_has_checkpoint(source: JobSource, checkpoint: str) -> bool:
 
 
 def _prepare_source(
-    context: _Context, cancelled, beat
+    context: _Context, cancelled, beat, report
 ) -> _Context:  # noqa: ANN001, PLR0912, PLR0915
     if cancelled():
         raise AnalysisCancelled()
+    report(context, "probing", 2.0, "Reading video metadata.")
     beat()
     info = probe_media(context.source, context.settings)
     context.info = info
@@ -271,17 +325,28 @@ def _prepare_source(
                 job_service.add_warning(job, warning)
         already_detected = _source_has_checkpoint(source_row, CHECKPOINT_DETECTED)
 
+    report(context, "detecting", 10.0, "Metadata read. Detecting shot boundaries.")
+
     if not already_detected:
         with session_scope() as db:
             db.execute(delete(CandidateShot).where(CandidateShot.source_id == context.source_id))
             db.execute(delete(DetectedShot).where(DetectedShot.source_id == context.source_id))
+
+        def on_detection_progress(fraction: float) -> None:
+            beat()
+            report(
+                context,
+                "detecting",
+                10.0 + 50.0 * fraction,
+                f"Scanning video frames · {round(fraction * 100)}% complete.",
+            )
 
         result = get_detector().detect(
             context.source,
             info,
             settings=context.settings,
             should_cancel=cancelled,
-            on_progress=lambda _fraction: beat(),
+            on_progress=on_detection_progress,
         )
         safe_shots = interval_module.build_safe_shots(
             result.shots,
@@ -346,6 +411,13 @@ def _prepare_source(
             source_row.eligible_count = eligible
             source_row.checkpoint = CHECKPOINT_DETECTED
 
+        report(
+            context,
+            "measuring",
+            62.0,
+            f"Found {eligible} usable shot(s) of {len(safe_shots)} detected.",
+        )
+
     with session_scope() as db:
         source_row = db.get(JobSource, context.source_id)
         assert source_row is not None
@@ -361,12 +433,23 @@ def _prepare_source(
         ]
 
     if not already_prepared:
+        report(
+            context,
+            "measuring",
+            62.0,
+            f"Measuring quality for {len(candidate_specs)} candidate(s).",
+        )
         raws: dict[str, feature_module.RawFeatures] = {}
         thumb_dir = storage.ensure_dir(
             f"{storage.job_subdir(context.job_id, 'contact-sheets')}/thumbs",
             context.settings,
         )
-        for candidate_id, safe_start, safe_end, rec_start, rec_end in candidate_specs:
+        if not candidate_specs:
+            report(context, "ranking", 82.0, "No usable shots; source preparation complete.")
+        for index, (candidate_id, safe_start, safe_end, rec_start, rec_end) in enumerate(
+            candidate_specs,
+            start=1,
+        ):
             if cancelled():
                 raise AnalysisCancelled()
             beat()
@@ -389,6 +472,13 @@ def _prepare_source(
                     settings=context.settings,
                     should_cancel=cancelled,
                 )
+            if index == 1 or index % 5 == 0 or index == len(candidate_specs):
+                report(
+                    context,
+                    "measuring",
+                    65.0 + 15.0 * (index / max(1, len(candidate_specs))),
+                    f"Measuring candidate {index} of {len(candidate_specs)}.",
+                )
 
         scored_features = feature_module.normalize_job(raws)
         with session_scope() as db:
@@ -407,6 +497,8 @@ def _prepare_source(
             source_row = db.get(JobSource, context.source_id)
             assert source_row is not None
             source_row.checkpoint = CHECKPOINT_PREPARED
+
+        report(context, "ranking", 82.0, "Local measurements complete.")
 
     return context
 
@@ -436,6 +528,14 @@ def _rank_multi_sources(
     by_source: dict[str, list[CandidateShot]] = {}
 
     for context in contexts:
+        _record_source_progress(
+            context,
+            "ranking",
+            84.0,
+            "Organizing candidates for manual review."
+            if not ranking_enabled
+            else "Ranking candidate clips.",
+        )
         with session_scope() as db:
             source_row = db.get(JobSource, context.source_id)
             candidates = list(
@@ -445,6 +545,12 @@ def _rank_multi_sources(
             )
         by_source[context.source_id] = candidates
         if not ranking_enabled:
+            _record_source_progress(
+                context,
+                "ranking",
+                93.0,
+                f"Organized {len(candidates)} candidate(s).",
+            )
             continue
         assert source_row is not None and context.info is not None
         source_job = copy.copy(job_template)
@@ -471,6 +577,12 @@ def _rank_multi_sources(
         outcomes.append(outcome)
         all_scored.extend(outcome.scored.values())
         fine_windows.update(outcome.fine_windows)
+        _record_source_progress(
+            context,
+            "ranking",
+            93.0,
+            f"Ranked {len(candidates)} candidate(s).",
+        )
 
     source_order = {context.source_id: context.source_order for context in contexts}
     if ranking_enabled:
@@ -557,7 +669,10 @@ def _rank_multi_sources(
             select(JobSource).where(JobSource.job_id == job_id)
         ).scalars():
             source_row.checkpoint = CHECKPOINT_RANKED
-            source_row.state = "ready"
+            source_row.state = "processing"
+            source_row.progress_phase = "previews"
+            source_row.progress_percent = max(source_row.progress_percent, 95.0)
+            source_row.progress_message = "Rendering review previews."
         job_service.commit_checkpoint(db, job, CHECKPOINT_RANKED)
         job_service.set_progress(
             db,
@@ -619,6 +734,7 @@ def _stage_probe(context: _Context, checkpoint: str | None, cancelled, beat) -> 
             return
         job_service.transition(db, job, "probing", message="Reading video metadata.")
 
+    _record_source_progress(context, "probing", 2.0, "Reading video metadata.")
     if cancelled():
         raise AnalysisCancelled()
     beat()
@@ -641,6 +757,12 @@ def _stage_probe(context: _Context, checkpoint: str | None, cancelled, beat) -> 
             db, job, phase="probing", percent=8.0, message="Video metadata read."
         )
         job_service.commit_checkpoint(db, job, CHECKPOINT_PROBED)
+    _record_source_progress(
+        context,
+        "detecting",
+        10.0,
+        "Metadata read. Detecting shot boundaries.",
+    )
 
 
 def _info_from_upload(db, job: Job, settings: Settings) -> MediaInfo:  # noqa: ANN001
@@ -673,17 +795,12 @@ def _stage_detect(context: _Context, checkpoint: str | None, cancelled, beat) ->
 
     def on_progress(fraction: float) -> None:
         beat()
-        with session_scope() as db:
-            job = db.get(Job, context.job_id)
-            if job is not None:
-                job_service.set_progress(
-                    db,
-                    job,
-                    phase="detecting",
-                    percent=10.0 + 30.0 * fraction,
-                    message="Detecting shot boundaries.",
-                    emit=False,
-                )
+        _record_source_progress(
+            context,
+            "detecting",
+            10.0 + 50.0 * fraction,
+            f"Scanning video frames · {round(fraction * 100)}% complete.",
+        )
 
     result = get_detector().detect(
         context.source,
@@ -768,6 +885,13 @@ def _stage_detect(context: _Context, checkpoint: str | None, cancelled, beat) ->
         )
         job_service.commit_checkpoint(db, job, CHECKPOINT_DETECTED)
 
+    _record_source_progress(
+        context,
+        "measuring",
+        62.0,
+        f"Found {eligible} usable shot(s) of {len(safe_shots)} detected.",
+    )
+
     logger.info(
         "detection complete",
         extra={"job_id": context.job_id, "context": result.diagnostics},
@@ -798,11 +922,23 @@ def _stage_features(context: _Context, checkpoint: str | None, cancelled, beat) 
             job = db.get(Job, context.job_id)
             if job is not None:
                 job_service.commit_checkpoint(db, job, CHECKPOINT_PREPARED)
+        _record_source_progress(
+            context,
+            "ranking",
+            82.0,
+            "No usable shots; source preparation complete.",
+        )
         return
 
     info = context.info
     assert info is not None
     raws: dict[str, feature_module.RawFeatures] = {}
+    _record_source_progress(
+        context,
+        "measuring",
+        62.0,
+        f"Measuring quality for {len(candidate_specs)} candidate(s).",
+    )
 
     thumb_dir = storage.ensure_dir(
         f"{storage.job_subdir(context.job_id, 'contact-sheets')}/thumbs", context.settings
@@ -836,18 +972,14 @@ def _stage_features(context: _Context, checkpoint: str | None, cancelled, beat) 
                 should_cancel=cancelled,
             )
 
-        if index % 5 == 0:
-            with session_scope() as db:
-                job = db.get(Job, context.job_id)
-                if job is not None:
-                    job_service.set_progress(
-                        db,
-                        job,
-                        phase="detecting",
-                        percent=45.0 + 10.0 * (index / max(1, len(candidate_specs))),
-                        message=f"Measuring candidate {index + 1} of {len(candidate_specs)}.",
-                        emit=False,
-                    )
+        completed = index + 1
+        if completed == 1 or completed % 5 == 0 or completed == len(candidate_specs):
+            _record_source_progress(
+                context,
+                "measuring",
+                65.0 + 15.0 * (completed / max(1, len(candidate_specs))),
+                f"Measuring candidate {completed} of {len(candidate_specs)}.",
+            )
 
     scored_features = feature_module.normalize_job(raws)
 
@@ -873,6 +1005,7 @@ def _stage_features(context: _Context, checkpoint: str | None, cancelled, beat) 
         source_row = db.get(JobSource, context.source_id)
         if source_row is not None:
             source_row.checkpoint = CHECKPOINT_PREPARED
+    _record_source_progress(context, "ranking", 82.0, "Local measurements complete.")
 
 
 # --- Stage F through J -----------------------------------------------------
@@ -893,11 +1026,19 @@ def _stage_rank(
         job_snapshot = job
 
     if not job_snapshot.ranking_enabled:
+        _record_source_progress(
+            context,
+            "ranking",
+            84.0,
+            "Organizing candidates for manual review.",
+        )
         _finish_manual_ranking(context, candidates, cancelled, beat)
         return
 
     if cancelled():
         raise AnalysisCancelled()
+
+    _record_source_progress(context, "ranking", 84.0, "Ranking candidate clips.")
 
     info = context.info
     assert info is not None
@@ -929,6 +1070,12 @@ def _stage_rank(
         raise AnalysisCancelled()
 
     ranked = scoring.rank(list(outcome.scored.values()))
+    _record_source_progress(
+        context,
+        "ranking",
+        93.0,
+        f"Ranked {len(candidates)} candidate(s).",
+    )
 
     with session_scope() as db:
         job = db.get(Job, context.job_id)
@@ -995,7 +1142,10 @@ def _stage_rank(
         source_row = db.get(JobSource, context.source_id)
         if source_row is not None:
             source_row.checkpoint = CHECKPOINT_RANKED
-            source_row.state = "ready"
+            source_row.state = "processing"
+            source_row.progress_phase = "previews"
+            source_row.progress_percent = max(source_row.progress_percent, 95.0)
+            source_row.progress_message = "Rendering review previews."
         job_service.set_progress(
             db,
             job,
@@ -1065,6 +1215,9 @@ def _finish_manual_ranking(
         if source_row is not None:
             source_row.checkpoint = CHECKPOINT_RANKED
             source_row.state = "ready"
+            source_row.progress_phase = "ready"
+            source_row.progress_percent = 100.0
+            source_row.progress_message = "Analysis complete."
         job_service.set_progress(
             db,
             job,
@@ -1178,10 +1331,17 @@ def _screen_for_humans(
 def _render_previews(context: _Context, targets, cancelled, beat) -> None:  # noqa: ANN001
     info = context.info
     assert info is not None
+    targets = list(targets)
+    _record_source_progress(
+        context,
+        "previews",
+        95.0,
+        f"Rendering {len(targets)} review preview(s)." if targets else "Finalizing review.",
+    )
     preview_dir = storage.ensure_dir(
         storage.job_subdir(context.job_id, "previews"), context.settings
     )
-    for candidate_id, start_us, end_us in targets:
+    for index, (candidate_id, start_us, end_us) in enumerate(targets, start=1):
         if cancelled():
             return
         beat()
@@ -1202,6 +1362,13 @@ def _render_previews(context: _Context, targets, cancelled, beat) -> None:  # no
         except (MediaToolError, ClipRenderError):
             # A preview is a convenience; its failure must not fail the job.
             logger.warning("preview render failed", extra={"job_id": context.job_id})
+        _record_source_progress(
+            context,
+            "previews",
+            95.0 + 5.0 * (index / max(1, len(targets))),
+            f"Rendered preview {index} of {len(targets)}.",
+        )
+    _record_source_progress(context, "ready", 100.0, "Analysis complete.")
 
 
 def ensure_preview(job_id: str, candidate_id: str, settings: Settings) -> Path:

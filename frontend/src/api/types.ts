@@ -80,6 +80,7 @@ export interface Upload {
   sha256: string | null;
   progressPercent: number;
   sourceKind: "file" | "url";
+  suggestedSourceName: string | null;
   error: JobError | null;
   createdAt: string;
   updatedAt: string;
@@ -171,6 +172,15 @@ export interface JobSource {
   sourceLabel: SourceLabel | null;
   contentPrompt: string | null;
   video: Job["video"];
+  state: string;
+  progress: {
+    phase: "queued" | "probing" | "detecting" | "measuring" | "ranking" | "previews" | "ready";
+    percent: number;
+    message: string;
+  };
+  detectedCount: number | null;
+  eligibleCount: number | null;
+  updatedAt: string;
 }
 
 export interface JobSourceInput {

@@ -152,7 +152,8 @@ def test_existing_job_and_candidates_are_attached_to_a_backfilled_source(
         with sqlite3.connect(database) as connection:
             source = connection.execute(
                 """
-                SELECT id, upload_id, source_name, state
+                SELECT id, upload_id, source_name, state,
+                       progress_phase, progress_percent, progress_message
                 FROM job_sources WHERE job_id = ?
                 """,
                 (job_id,),
@@ -172,7 +173,14 @@ def test_existing_job_and_candidates_are_attached_to_a_backfilled_source(
             ).fetchone()
 
         assert source is not None
-        assert source[1:] == (upload_id, "LEGACY SOURCE", "ready")
+        assert source[1:] == (
+            upload_id,
+            "LEGACY SOURCE",
+            "ready",
+            "ready",
+            100.0,
+            "Analysis complete.",
+        )
         assert candidate == (source[0], "LEGACY SOURCE", "legacy.mp4")
         assert detected_source == (source[0],)
         assert ranking_enabled == (1,)

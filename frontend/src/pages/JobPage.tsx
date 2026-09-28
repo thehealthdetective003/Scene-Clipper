@@ -10,6 +10,7 @@ import type {
   ReviewClipInput,
   SelectedClip,
 } from "../api/types";
+import { AnalysisActivity } from "../components/AnalysisActivity";
 import { CandidateCard } from "../components/CandidateCard";
 import { ExportPanel } from "../components/ExportPanel";
 import { Button } from "../components/ui/Button";
@@ -18,7 +19,6 @@ import {
   IconFilm,
   IconLayers,
   IconRefresh,
-  IconSparkle,
   IconX,
 } from "../components/ui/Icons";
 import {
@@ -77,6 +77,23 @@ export function JobPage() {
   useEffect(() => {
     void loadJob();
   }, [loadJob]);
+
+  const running = job ? RUNNING.includes(job.state) : false;
+
+  // Per-source frame and candidate progress is a compact database snapshot,
+  // so refresh it between the durable stage-transition events.
+  useEffect(() => {
+    if (!running) return;
+    let requestActive = false;
+    const refresh = async () => {
+      if (requestActive) return;
+      requestActive = true;
+      await loadJob();
+      requestActive = false;
+    };
+    const timer = window.setInterval(() => void refresh(), 1500);
+    return () => window.clearInterval(timer);
+  }, [running, loadJob]);
 
   // Live progress; a disconnect never affects the worker (spec 5.5).
   const { connection } = useJobEvents(jobId, {
@@ -249,8 +266,6 @@ export function JobPage() {
       </div>
     );
   }
-
-  const running = RUNNING.includes(job.state);
 
   return (
     <div className="space-y-6">
@@ -497,13 +512,7 @@ export function JobPage() {
       )}
 
       {running && (
-        <div className="rounded-panel border border-line bg-paper shadow-card">
-          <EmptyState
-            icon={<IconSparkle style={{ height: 22, width: 22 }} />}
-            title="Analysis in progress"
-            description="Detecting shot boundaries and measuring each candidate. You can close this tab — the job keeps running."
-          />
-        </div>
+        <AnalysisActivity job={job} connection={connection} />
       )}
     </div>
   );

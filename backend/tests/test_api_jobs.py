@@ -292,6 +292,18 @@ class TestJobCreationValidation:
             "focus on red machines",
             "focus on blue machines",
         ]
+        assert [source["progress"] for source in body["sources"]] == [
+            {
+                "phase": "queued",
+                "percent": 0.0,
+                "message": "Waiting for analysis to start.",
+            },
+            {
+                "phase": "queued",
+                "percent": 0.0,
+                "message": "Waiting for analysis to start.",
+            },
+        ]
 
         listing = auth_client.get(JOBS).json()["items"][0]
         assert listing["sourceCount"] == 2

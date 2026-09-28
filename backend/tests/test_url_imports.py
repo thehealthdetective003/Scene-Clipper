@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from app.db import session_scope
-from app.downloading import UrlDownloadError, _assert_public_origin, run_url_download
+from app.downloading import (
+    UrlDownloadError,
+    _assert_public_origin,
+    _suggested_source_name,
+    run_url_download,
+)
 from app.models import Upload
 from app.workers import recovery
 
@@ -27,6 +32,7 @@ class TestUrlImportApi:
         assert body["state"] == "downloading"
         assert body["sourceKind"] == "url"
         assert body["declaredSizeBytes"] == 0
+        assert body["suggestedSourceName"] is None
         assert body["id"] in no_queue["download"]
         assert "url" not in {key.lower() for key in body}
 
@@ -75,7 +81,7 @@ def test_downloader_publishes_into_the_normal_verification_lifecycle(
     def fake_download(_url, workspace: Path, **_kwargs):
         result = workspace / "download.webm"
         result.write_bytes(b"downloaded-media")
-        return "A useful title", result
+        return "A useful title", "Global Times", result
 
     monkeypatch.setattr("app.downloading._download", fake_download)
     queued: list[str] = []
@@ -91,12 +97,40 @@ def test_downloader_publishes_into_the_normal_verification_lifecycle(
         assert upload is not None
         assert upload.state == "verifying"
         assert upload.file_name == "A useful title.webm"
+        assert upload.suggested_source_name == "Global Times"
         assert upload.storage_ext == "webm"
         assert upload.declared_size_bytes == len(b"downloaded-media")
         assert upload.source_url == "https://video.example/watch/one"
         assert upload.relative_source_path == f"uploads/{upload_id}/source.webm"
     assert (settings.uploads_dir / upload_id / "source.webm").read_bytes() == b"downloaded-media"
     assert queued == [upload_id]
+
+    body = auth_client.get(f"/api/v1/uploads/{upload_id}").json()
+    assert body["suggestedSourceName"] == "Global Times"
+
+
+def test_channel_metadata_is_preferred_for_the_source_name():
+    assert (
+        _suggested_source_name(
+            {
+                "channel": " Global   Times ",
+                "uploader": "Uploader fallback",
+                "creator": "Creator fallback",
+            }
+        )
+        == "Global Times"
+    )
+
+
+def test_invalid_channel_metadata_falls_back_to_a_renderable_uploader():
+    assert (
+        _suggested_source_name({"channel": "🚀", "uploader": "Usable uploader"})
+        == "Usable uploader"
+    )
+
+
+def test_unsupported_channel_decoration_is_removed_without_losing_the_name():
+    assert _suggested_source_name({"channel": "Channel 🚀"}) == "Channel"
 
 
 def test_downloader_failure_is_sanitized_for_the_client(auth_client, monkeypatch):

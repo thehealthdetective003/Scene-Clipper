@@ -230,6 +230,7 @@ class UploadResponse(ApiModel):
     sha256: str | None
     progress_percent: float
     source_kind: UploadSourceKind
+    suggested_source_name: str | None
     error: JobErrorModel | None
     created_at: str
     updated_at: str
@@ -300,6 +301,14 @@ class ProgressModel(ApiModel):
     message: str
 
 
+class SourceProgressModel(ApiModel):
+    phase: Literal[
+        "queued", "probing", "detecting", "measuring", "ranking", "previews", "ready"
+    ]
+    percent: float
+    message: str
+
+
 class VideoModel(ApiModel):
     sha256: str
     duration_us: int
@@ -319,6 +328,11 @@ class JobSourceModel(ApiModel):
     source_label: SourceLabelModel | None
     content_prompt: str | None
     video: VideoModel | None
+    state: str
+    progress: SourceProgressModel
+    detected_count: int | None
+    eligible_count: int | None
+    updated_at: str
 
 
 class AnalysisUsageModel(ApiModel):

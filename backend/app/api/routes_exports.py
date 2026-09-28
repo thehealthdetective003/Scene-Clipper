@@ -36,6 +36,28 @@ _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._ -]+")
 _SEPARATOR_RUN = re.compile(r"[\s-]+")
 
 
+def _enqueue_committed_export(db, export, job) -> None:  # noqa: ANN001
+    """Commit export state before an RQ worker can consume its task.
+
+    A worker may pick up a task immediately. Enqueuing before the request
+    transaction commits lets it observe no export row and return, leaving the
+    subsequently committed row queued forever.
+    """
+    db.commit()
+    if enqueue_export(export.id):
+        return
+
+    exports.fail(
+        db,
+        export,
+        job,
+        code="export_queue_unavailable",
+        message="The export queue is temporarily unavailable. Retry the export.",
+        retryable=True,
+    )
+    db.commit()
+
+
 def _safe_zip_name(requested: str | None, fallback: str) -> str:
     """Return an ASCII attachment name that cannot inject response headers."""
     value = _ZIP_SUFFIX.sub("", (requested or fallback).strip())
@@ -118,8 +140,8 @@ def create_export(
         response_body=response.model_dump(by_alias=True),
         resource_id=export.id,
     )
-    enqueue_export(export.id)
-    return response
+    _enqueue_committed_export(db, export, job)
+    return export_response(export)
 
 
 @router.get(
@@ -166,20 +188,22 @@ def retry_export(
     replay = idempotency.lookup(
         db, key=idempotency_key, principal=auth.username, method="POST", route=route, body=body
     )
-    if replay is None:
-        exports.reset_for_retry(db, export, job)
-        idempotency.remember(
-            db,
-            key=idempotency_key,
-            principal=auth.username,
-            method="POST",
-            route=route,
-            body=body,
-            status_code=status.HTTP_202_ACCEPTED,
-            response_body=None,
-            resource_id=export.id,
-        )
-    enqueue_export(export.id)
+    if replay is not None:
+        return export_response(export)
+
+    exports.reset_for_retry(db, export, job)
+    idempotency.remember(
+        db,
+        key=idempotency_key,
+        principal=auth.username,
+        method="POST",
+        route=route,
+        body=body,
+        status_code=status.HTTP_202_ACCEPTED,
+        response_body=None,
+        resource_id=export.id,
+    )
+    _enqueue_committed_export(db, export, job)
     return export_response(export)
 
 

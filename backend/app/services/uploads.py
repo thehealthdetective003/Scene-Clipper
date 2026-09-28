@@ -373,6 +373,7 @@ def finish_url_download(
     upload: Upload,
     *,
     title: str | None,
+    suggested_source_name: str | None,
     extension: str,
     size_bytes: int,
 ) -> None:
@@ -380,6 +381,7 @@ def finish_url_download(
     safe_extension = storage.sanitize_extension(f"source.{extension}", default="bin")
     display_title = _sanitize_display_name(title or "Downloaded video")
     upload.file_name = _sanitize_display_name(f"{display_title}.{safe_extension}")
+    upload.suggested_source_name = suggested_source_name
     upload.storage_ext = safe_extension
     upload.declared_size_bytes = size_bytes
     upload.verified_offset_bytes = size_bytes

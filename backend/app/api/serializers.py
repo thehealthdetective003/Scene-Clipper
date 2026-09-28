@@ -27,6 +27,7 @@ from app.schemas import (
     SelectedClipModel,
     SourceLabelModel,
     SourceLabelStyleModel,
+    SourceProgressModel,
     UploadResponse,
     VideoModel,
 )
@@ -88,6 +89,7 @@ def upload_response(upload: models.Upload) -> UploadResponse:
         sha256=upload.sha256,
         progress_percent=progress_percent(upload),
         source_kind=upload.source_kind,  # type: ignore[arg-type]
+        suggested_source_name=upload.suggested_source_name,
         error=error_model(upload.error),
         created_at=iso_required(upload.created_at),
         updated_at=iso_required(upload.updated_at),
@@ -238,6 +240,15 @@ def job_source_model(source: models.JobSource, upload: models.Upload) -> JobSour
         ),
         content_prompt=source.content_prompt,
         video=source_video_model(source),
+        state=source.state,
+        progress=SourceProgressModel(
+            phase=source.progress_phase,  # type: ignore[arg-type]
+            percent=round(source.progress_percent, 2),
+            message=source.progress_message,
+        ),
+        detected_count=source.detected_count,
+        eligible_count=source.eligible_count,
+        updated_at=iso_required(source.updated_at),
     )
 
 
