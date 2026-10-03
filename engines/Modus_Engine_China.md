@@ -35,6 +35,12 @@ about China/US — frame the China/US production gap as engineering stakes, not 
 
 ## Retention benchmarks (from the channel's recent uploads — hit this tier)
 Target band: 29–32% average viewed, AVD 4:30–5:30 on 15–17 minute videos.
+22-minute target (the default runtime): 26–29% average viewed, AVD 5:45–6:20. Longer
+videos lose a few points of average viewed, so the goal is MORE absolute watch time
+than the 15–17 minute tier, not the same percentage. This is a projected target, not
+measured channel data — recalibrate it once real 22-minute uploads have analytics.
+On 22-minute videos, place a second key-moment spike in the back half (~60–70% mark)
+to stop the late-video drop-off.
 The hook must pay off inside the first 60 seconds. Every video needs at least one
 mid-video key-moment spike — a revelation that re-hooks attention. Protect the opening:
 ~65–70% of viewers should still be watching at 0:30.
