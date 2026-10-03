@@ -65,7 +65,7 @@ channel already covered, regardless of title differences. When in doubt, ask.
   text, ever. Stages 10–11 and Gate 5 are DISABLED — skip them entirely.
 - Titles: the user titles his own videos. Stages 8–9 produce suggestions only;
   never lock a final title.
-- Duration default: 16 minutes unless the user says otherwise (Gate 2 pre-answered).
+- Duration default: 22 minutes unless the user says otherwise (Gate 2 pre-answered).
 
 ---
 

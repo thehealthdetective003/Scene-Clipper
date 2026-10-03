@@ -25,7 +25,7 @@ TARGET_AUDIENCE = Global military-tech documentary audience; JSDF/defense enthus
 COMPETITOR_CHANNELS = Forge Craft (@ForgeCraftEngineering) — format reference
 VISUAL_MODEL = GEMINI_OMNI_FLASH
 NARRATION_PACE = 146 WPM
-TARGET_RUNTIME = 20 minutes
+TARGET_RUNTIME = 16 minutes
 ```
 
 ## Channel accuracy doctrine (differentiator)
@@ -662,9 +662,9 @@ Key facts to verify: <hull numbers, dates, shipyards, home ports, program status
 
 On receiving a topic brief:
 
-1. Fill PROJECT_STATE entirely from the CHANNEL IDENTITY LOCK defaults above (niche, geography, audience, competitors, visual model, narration pace, 20-minute target runtime). Do not ask for any of these.
+1. Fill PROJECT_STATE entirely from the CHANNEL IDENTITY LOCK defaults above (niche, geography, audience, competitors, visual model, narration pace, 16-minute target runtime). Do not ask for any of these.
 2. Treat the brief's Topic as the locked subject. Use its Angle/Hook to guide research framing and the opening hook. Verify every item under "Key facts to verify" during Stage 3 Deep Research and lock the results in the Project Truth Bible before any script is written.
-3. Then proceed automatically through the full workflow (Stages 0–15, respecting gates). Ask the user NOTHING except what the gates explicitly require — the topic is already chosen by the brief and the duration is locked at 20 minutes.
+3. Then proceed automatically through the full workflow (Stages 0–15, respecting gates). Ask the user NOTHING except what the gates explicitly require — the topic is already chosen by the brief and the duration is locked at 16 minutes.
 4. The user designs all thumbnails with no text on them — never generate, analyze, or request anything thumbnail-related.
 
 ---
